@@ -80,6 +80,13 @@ printf '%s\n' \
 set is pinned by a drift test in `crates/app-server/src/lib.rs`, so SDK and
 local integration clients can rely on it not changing silently.
 
+`thread/cancel` (alias `thread/interrupt`) interrupts the turn currently
+streaming on the stdio transport. It is honored *while* the turn is in
+flight: the stdio loop keeps reading stdin during a turn, and cancel never
+takes the runtime-bridge lock the turn holds. `shutdown` behaves the same
+way — it interrupts the in-flight turn, waits a bounded grace period for it
+to unwind, then stops regardless.
+
 ## SDK contract
 
 The app-server exists so an external SDK can answer — without scraping TUI

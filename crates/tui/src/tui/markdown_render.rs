@@ -60,6 +60,25 @@ pub fn reset_parse_invocation_count() {
     PARSE_INVOCATIONS.with(|c| c.set(0));
 }
 
+// Thread-local counter incremented once per source line classified by
+// `parse_line_into`. Lets tests assert the parser touches each line exactly
+// once (no quadratic re-scanning) independently of how many blocks come out.
+#[cfg(test)]
+thread_local! {
+    static PARSED_LINES: Cell<u64> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+#[must_use]
+pub fn parsed_line_count() -> u64 {
+    PARSED_LINES.with(|c| c.get())
+}
+
+#[cfg(test)]
+pub fn reset_parsed_line_count() {
+    PARSED_LINES.with(|c| c.set(0));
+}
+
 /// One classified line of markdown source, width-independent.
 ///
 /// All decisions that depend only on the source text (heading level, bullet
@@ -153,81 +172,102 @@ pub fn parse(content: &str) -> ParsedMarkdown {
     PARSE_INVOCATIONS.with(|c| c.set(c.get() + 1));
 
     let mut blocks = Vec::new();
-    let mut in_code_block = false;
-    let mut code_language: Option<String> = None;
-    let mut code_block_id = 0usize;
-
+    let mut state = ParseState::default();
     for raw_line in content.lines() {
-        let trimmed = raw_line.trim_start();
-        if trimmed.starts_with("```") {
-            if in_code_block {
-                in_code_block = false;
-                code_language = None;
-            } else {
-                in_code_block = true;
-                code_block_id = code_block_id.saturating_add(1);
-                code_language = normalized_fence_language(trimmed.trim_start_matches('`'));
-            }
-            continue;
-        }
+        parse_line_into(&mut blocks, &mut state, raw_line);
+    }
+    ParsedMarkdown { blocks }
+}
 
-        if in_code_block {
-            blocks.push(Block::Code {
-                line: raw_line.to_string(),
-                language: code_language.clone(),
-                block_id: code_block_id,
-            });
-            continue;
-        }
+/// Carry-over parser state between source lines.
+///
+/// The block parser is line-oriented: every line's classification depends only
+/// on the line itself plus this small amount of carry-over (are we inside a
+/// fence, and which fence). Keeping that carry-over in one explicit value is
+/// what would make an incremental/streaming parse sound: resuming mid-document
+/// needs nothing but the `ParseState` left behind by the previous line.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ParseState {
+    in_code_block: bool,
+    code_language: Option<String>,
+    code_block_id: usize,
+}
 
-        if let Some((level, text)) = parse_heading(trimmed) {
-            blocks.push(Block::Heading {
-                level,
-                text: text.to_string(),
-            });
-            if level == 1 {
-                blocks.push(Block::HeadingRule);
-            }
-            continue;
-        }
+/// Classify one source line and append the resulting block(s).
+///
+/// Single source of truth for line classification, so any future incremental
+/// path and [`parse`] can never drift apart.
+fn parse_line_into(blocks: &mut Vec<Block>, state: &mut ParseState, raw_line: &str) {
+    #[cfg(test)]
+    PARSED_LINES.with(|c| c.set(c.get() + 1));
 
-        if let Some((bullet, text)) = parse_list_item(trimmed) {
-            blocks.push(Block::ListItem {
-                bullet,
-                text: text.to_string(),
-            });
-            continue;
+    let trimmed = raw_line.trim_start();
+    if trimmed.starts_with("```") {
+        if state.in_code_block {
+            state.in_code_block = false;
+            state.code_language = None;
+        } else {
+            state.in_code_block = true;
+            state.code_block_id = state.code_block_id.saturating_add(1);
+            state.code_language = normalized_fence_language(trimmed.trim_start_matches('`'));
         }
-
-        if is_horizontal_rule(trimmed) {
-            blocks.push(Block::HorizontalRule);
-            continue;
-        }
-
-        match parse_table_row(trimmed) {
-            Some(cells) => {
-                blocks.push(Block::TableRow(cells));
-                continue;
-            }
-            None if trimmed.starts_with('|') => {
-                blocks.push(Block::TableSeparator);
-                continue;
-            }
-            None => {}
-        }
-
-        if trimmed.is_empty() {
-            // Whitespace-only lines are blank paragraphs.
-            blocks.push(Block::Blank);
-            continue;
-        }
-
-        blocks.push(Block::Paragraph {
-            text: raw_line.to_string(),
-        });
+        return;
     }
 
-    ParsedMarkdown { blocks }
+    if state.in_code_block {
+        blocks.push(Block::Code {
+            line: raw_line.to_string(),
+            language: state.code_language.clone(),
+            block_id: state.code_block_id,
+        });
+        return;
+    }
+
+    if let Some((level, text)) = parse_heading(trimmed) {
+        blocks.push(Block::Heading {
+            level,
+            text: text.to_string(),
+        });
+        if level == 1 {
+            blocks.push(Block::HeadingRule);
+        }
+        return;
+    }
+
+    if let Some((bullet, text)) = parse_list_item(trimmed) {
+        blocks.push(Block::ListItem {
+            bullet,
+            text: text.to_string(),
+        });
+        return;
+    }
+
+    if is_horizontal_rule(trimmed) {
+        blocks.push(Block::HorizontalRule);
+        return;
+    }
+
+    match parse_table_row(trimmed) {
+        Some(cells) => {
+            blocks.push(Block::TableRow(cells));
+            return;
+        }
+        None if trimmed.starts_with('|') => {
+            blocks.push(Block::TableSeparator);
+            return;
+        }
+        None => {}
+    }
+
+    if trimmed.is_empty() {
+        // Whitespace-only lines are blank paragraphs.
+        blocks.push(Block::Blank);
+        return;
+    }
+
+    blocks.push(Block::Paragraph {
+        text: raw_line.to_string(),
+    });
 }
 
 /// Render a parsed-markdown AST at the given terminal width.
@@ -1831,6 +1871,40 @@ mod tests {
         let _ = parse("hello\n");
         let _ = parse("world\n");
         assert_eq!(parse_invocation_count(), 2);
+    }
+
+    #[test]
+    fn parse_classifies_each_source_line_exactly_once() {
+        // The extracted `parse_line_into` must be called once per source
+        // line: no re-scanning, no skipped lines. Block count deliberately
+        // differs from line count here (fence lines emit nothing, `# h1`
+        // emits two blocks), so this pins the per-line cost, not the output.
+        let source = "# h1\n```rust\nlet x = 1;\n```\ntail\n";
+        reset_parsed_line_count();
+        let parsed = parse(source);
+        assert_eq!(parsed_line_count(), source.lines().count() as u64);
+        assert_ne!(parsed.blocks.len(), source.lines().count());
+    }
+
+    #[test]
+    fn parse_state_carries_fence_across_lines() {
+        // Fence carry-over lives entirely in `ParseState`; feeding lines one
+        // at a time through `parse_line_into` must match a whole-document
+        // parse exactly.
+        let source = "intro\n```sh\n# not a heading\n| not | a table |\n```\n- bullet\n";
+        let mut blocks = Vec::new();
+        let mut state = ParseState::default();
+        for line in source.lines() {
+            parse_line_into(&mut blocks, &mut state, line);
+        }
+        assert_eq!(blocks, parse(source).blocks);
+        assert!(!state.in_code_block, "fence should be closed at end");
+        assert!(
+            blocks
+                .iter()
+                .any(|b| matches!(b, Block::Code { line, .. } if line == "# not a heading")),
+            "lines inside a fence must stay code, not become headings"
+        );
     }
 
     #[test]

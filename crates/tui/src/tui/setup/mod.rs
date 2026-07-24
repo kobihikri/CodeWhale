@@ -4290,7 +4290,7 @@ mod tests {
             panic!("expected guided constitution preview event");
         };
         assert!(title.contains("Draft for Ratification"));
-        assert!(content.contains("<codewhale_user_constitution"));
+        assert!(content.contains("<codewhale_amendments"));
         assert!(content.contains("press G to ratify and save"));
         assert!(content.contains("REDUCED CORE AND OPT-IN MODULES"));
         assert!(content.contains("The bundled core stays active"));
@@ -5057,7 +5057,7 @@ mod tests {
         assert!(title.contains("Draft for Ratification"));
         assert!(content.contains("Drafted by GLM-5.2"));
         assert!(content.contains("A GLM-5.2 user shipping Rust."));
-        assert!(content.contains("<codewhale_user_constitution"));
+        assert!(content.contains("<codewhale_amendments"));
 
         // The install satisfied the preview gate; G ratifies the model draft.
         let action = view.handle_key(key(KeyCode::Char('g')));
@@ -5275,6 +5275,33 @@ mod tests {
     }
 
     #[test]
+    fn guided_templates_ratify_without_void_amendments() {
+        // The amendment entrenchments (#4783) refuse only *enlargement*. Every
+        // shipped guided template is ordinary preference and narrowing law, so
+        // none of it may be voided — a template that trips the validator would
+        // silently ship users a constitution with holes in it.
+        for locale in [
+            Locale::En,
+            Locale::Ja,
+            Locale::ZhHans,
+            Locale::ZhHant,
+            Locale::PtBr,
+            Locale::Es419,
+            Locale::Vi,
+            Locale::Ko,
+        ] {
+            let template = guided_constitution_template(locale);
+            let violations = template.amendment_violations();
+            assert!(
+                violations.is_empty(),
+                "guided template for {} was voided: {:?}",
+                locale.tag(),
+                violations
+            );
+        }
+    }
+
+    #[test]
     fn ratification_preview_uses_rendered_block_and_layer_order() {
         let draft = GuidedConstitutionDraft::default();
         let english = constitution_ratification_text(
@@ -5288,13 +5315,13 @@ mod tests {
             &DraftProvenance::Guided,
         );
 
-        assert!(english.contains("<codewhale_user_constitution"));
+        assert!(english.contains("<codewhale_amendments"));
         assert!(english.contains("Layer order"));
         assert!(english.contains("press G to ratify and save"));
         // Framing: powers and limits, not case-by-case; continuity, not memory.
         assert!(english.contains("powers and limits rather than deciding every case"));
         assert!(english.contains("but it is not memory"));
-        assert!(zh_hans.contains("<codewhale_user_constitution"));
+        assert!(zh_hans.contains("<codewhale_amendments"));
         assert!(zh_hans.contains("按 G 确认并保存"));
         assert!(zh_hans.contains("它界定协作方式与行为边界"));
         assert!(zh_hans.contains("但它不是记忆"));
@@ -5684,10 +5711,7 @@ mod tests {
         assert!(title.contains("Draft for Ratification"));
         assert!(content.contains("shown unchanged"), "{content}");
         assert!(content.contains("press K to keep it"), "{content}");
-        assert!(
-            content.contains("<codewhale_user_constitution"),
-            "{content}"
-        );
+        assert!(content.contains("<codewhale_amendments"), "{content}");
 
         // Second K completes the checkpoint without touching the file.
         let action = view.handle_key(key(KeyCode::Char('k')));

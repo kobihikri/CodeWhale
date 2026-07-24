@@ -30,7 +30,8 @@ pub use setup_state::{
     InheritedConfigFacts, RuntimePostureSource, SetupState, SetupStep, StepEntry, StepStatus,
 };
 pub use user_constitution::{
-    AutonomyPreference, UntrustedDraftParse, UserConstitution, UserConstitutionLoad,
+    AmendmentViolation, AutonomyPreference, EntrenchedArticle, UntrustedDraftParse,
+    UserConstitution, UserConstitutionLoad,
 };
 pub use xai_credentials::{
     LEGACY_XAI_OAUTH_FILE_NAME, XAI_OAUTH_GENERATION_PREFIX, XAI_OAUTH_GENERATION_SUFFIX,

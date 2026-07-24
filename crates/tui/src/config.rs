@@ -3002,6 +3002,24 @@ impl ShellAccessControl {
     }
 }
 
+/// Load the workspace's project config, queueing a user-visible notice when the
+/// file exists but is unreadable/unparseable (#4733).
+///
+/// A broken project config silently downgraded the workspace to the user's
+/// (possibly more permissive) baseline; the session still starts, but the user
+/// is told instead of only a `tracing::warn!` nobody sees.
+pub(crate) fn load_project_config_or_notice(
+    workspace: &Path,
+) -> Option<codewhale_config::ConfigToml> {
+    match codewhale_config::load_project_config(workspace) {
+        Ok(config) => config,
+        Err(err) => {
+            crate::project_context::push_context_notice(&format!("{err:#}"));
+            None
+        }
+    }
+}
+
 fn project_config_root_bool(workspace: &Path, key: &str) -> Option<bool> {
     [
         workspace
@@ -3120,20 +3138,16 @@ impl Config {
                     approval_policy_baseline_from_permission_posture(Some(&posture))
                 });
             let approval_baseline = self.approval_policy.as_deref().or(saved_approval_baseline);
-            let parsed_controls =
-                codewhale_config::load_project_config(workspace).is_some_and(|project| {
-                    project.approval_policy.as_deref().is_some_and(|policy| {
-                        codewhale_config::project_approval_policy_is_allowed(
-                            approval_baseline,
-                            policy,
-                        )
-                    }) || project.sandbox_mode.as_deref().is_some_and(|sandbox| {
-                        codewhale_config::project_sandbox_mode_is_allowed(
-                            self.sandbox_mode.as_deref(),
-                            sandbox,
-                        )
-                    })
-                });
+            let parsed_controls = load_project_config_or_notice(workspace).is_some_and(|project| {
+                project.approval_policy.as_deref().is_some_and(|policy| {
+                    codewhale_config::project_approval_policy_is_allowed(approval_baseline, policy)
+                }) || project.sandbox_mode.as_deref().is_some_and(|sandbox| {
+                    codewhale_config::project_sandbox_mode_is_allowed(
+                        self.sandbox_mode.as_deref(),
+                        sandbox,
+                    )
+                })
+            });
             parsed_controls || project_config_root_bool(workspace, "allow_shell") == Some(false)
         };
         if !workspace_is_home && project_controls_runtime() {
@@ -3229,7 +3243,7 @@ impl Config {
                     approval_policy_baseline_from_permission_posture(Some(&posture))
                 });
             let approval_baseline = self.approval_policy.as_deref().or(saved_approval_baseline);
-            if codewhale_config::load_project_config(workspace)
+            if load_project_config_or_notice(workspace)
                 .and_then(|project| project.approval_policy)
                 .is_some_and(|policy| {
                     codewhale_config::project_approval_policy_is_allowed(approval_baseline, &policy)

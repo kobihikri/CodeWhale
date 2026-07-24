@@ -3213,7 +3213,7 @@ fn runtime_preset_diff_rows(preset: SetupRuntimePreset, facts: &SetupRuntimeFact
 }
 
 fn project_runtime_override_warning(workspace: &Path, locale: Locale) -> Option<String> {
-    let project = codewhale_config::load_project_config(workspace)?;
+    let project = crate::config::load_project_config_or_notice(workspace)?;
     let mut fields = Vec::new();
     if let Some(policy) = project.approval_policy.as_deref() {
         fields.push(format!("approval_policy={policy}"));

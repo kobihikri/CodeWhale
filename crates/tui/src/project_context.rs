@@ -1319,7 +1319,7 @@ static CONTEXT_NOTICES: LazyLock<Mutex<Vec<String>>> = LazyLock::new(|| Mutex::n
 static CONTEXT_NOTICES_SEEN: LazyLock<Mutex<HashSet<String>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
-fn push_context_notice(message: &str) {
+pub(crate) fn push_context_notice(message: &str) {
     let Ok(mut seen) = CONTEXT_NOTICES_SEEN.lock() else {
         return;
     };
@@ -1342,7 +1342,7 @@ pub fn take_context_notices() -> Vec<String> {
 }
 
 #[cfg(test)]
-fn reset_context_notices_for_test() {
+pub(crate) fn reset_context_notices_for_test() {
     if let Ok(mut seen) = CONTEXT_NOTICES_SEEN.lock() {
         seen.clear();
     }

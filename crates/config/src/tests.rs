@@ -2941,11 +2941,37 @@ fn load_project_config_rejects_symlinked_primary_config() {
     std::os::unix::fs::symlink(&outside_config, primary_dir.join(CONFIG_FILE_NAME))
         .expect("symlink project config");
 
-    let loaded = load_project_config(workspace.path());
+    let err = load_project_config(workspace.path())
+        .expect_err("symlinked primary project config should stop the project overlay");
 
     assert!(
-        loaded.is_none(),
-        "symlinked primary project config should stop the project overlay"
+        format!("{err:#}").contains("Failed to read project config"),
+        "rejection must be reportable to the user, got {err:#}"
+    );
+}
+
+#[test]
+fn load_project_config_reports_malformed_config_instead_of_pretending_it_is_absent() {
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let config_dir = workspace.path().join(CODEWHALE_APP_DIR);
+    fs::create_dir_all(&config_dir).expect("mkdir project config");
+    fs::write(
+        config_dir.join(CONFIG_FILE_NAME),
+        "approval_policy = \"never\"\nthis is not toml\n",
+    )
+    .expect("write malformed project config");
+
+    let err = load_project_config(workspace.path())
+        .expect_err("a malformed project config must not read as 'no project config'");
+    let rendered = format!("{err:#}");
+
+    assert!(
+        rendered.contains("Failed to parse project config"),
+        "error should name the parse failure, got {rendered}"
+    );
+    assert!(
+        !rendered.contains("this is not toml"),
+        "error must not leak file contents, got {rendered}"
     );
 }
 
@@ -2966,9 +2992,11 @@ base_url = "https://opencode.example/v1"
     )
     .expect("write project config");
 
+    let err = load_project_config(workspace.path())
+        .expect_err("project overlays must not gain named-provider authority");
     assert!(
-        load_project_config(workspace.path()).is_none(),
-        "project overlays must not gain named-provider authority"
+        format!("{err:#}").contains("may not select"),
+        "rejection must be reportable to the user, got {err:#}"
     );
 }
 

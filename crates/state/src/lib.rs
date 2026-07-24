@@ -1541,19 +1541,67 @@ impl StateStore {
         };
         let encoded =
             serde_json::to_string(&entry).context("failed to serialize session index entry")?;
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.session_index_path)
-            .with_context(|| {
+        // Append and compaction share one cross-process lock. Compaction is a
+        // read-snapshot-then-rename, so without this an append landing between another
+        // process's snapshot and its rename would be silently erased by that rename.
+        self.with_session_index_lock(|| {
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.session_index_path)
+                .with_context(|| {
+                    format!(
+                        "failed to open session index {}",
+                        self.session_index_path.display()
+                    )
+                })?;
+            writeln!(file, "{encoded}").context("failed to append session index entry")?;
+            self.maybe_compact_session_index()
+        })
+    }
+
+    /// Run `operation` while holding the exclusive session-index lock.
+    ///
+    /// The lock lives in a file adjacent to `session_index.jsonl` (mirroring the
+    /// discipline `codewhale-config` uses for `config.toml`) so that concurrent
+    /// CodeWhale *processes*, not just threads, serialize their index mutations.
+    fn with_session_index_lock<T>(&self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+        let lock_path = self.session_index_lock_path();
+        if let Some(parent) = lock_path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
                 format!(
-                    "failed to open session index {}",
-                    self.session_index_path.display()
+                    "failed to create session index directory {}",
+                    parent.display()
                 )
             })?;
-        writeln!(file, "{encoded}").context("failed to append session index entry")?;
-        self.maybe_compact_session_index()?;
-        Ok(())
+        }
+        let lock_file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .with_context(|| {
+                format!("failed to open session index lock {}", lock_path.display())
+            })?;
+        let mut lock = fd_lock::RwLock::new(lock_file);
+        let _guard = lock.write().with_context(|| {
+            format!(
+                "failed to acquire session index lock {}",
+                lock_path.display()
+            )
+        })?;
+        operation()
+    }
+
+    fn session_index_lock_path(&self) -> PathBuf {
+        let mut name = self
+            .session_index_path
+            .file_name()
+            .map(|value| value.to_os_string())
+            .unwrap_or_else(|| std::ffi::OsString::from("session_index.jsonl"));
+        name.push(".lock");
+        self.session_index_path.with_file_name(name)
     }
 
     /// Find the display name for a thread by its ID, using the session index.
@@ -1627,6 +1675,8 @@ impl StateStore {
         }
 
         let latest = self.session_index_map()?;
+        #[cfg(test)]
+        run_compact_snapshot_hook(&self.session_index_path);
         let compact_path = self.session_index_path.with_extension("jsonl.compact");
         {
             let mut file = OpenOptions::new()
@@ -1729,6 +1779,33 @@ impl StateStore {
             }
         }
         Ok(latest)
+    }
+}
+
+/// Test-only interleaving hook fired inside compaction, after the snapshot read and
+/// before the rename that replaces the live index. Lets a test occupy exactly the
+/// window where a concurrent append used to be lost.
+#[cfg(test)]
+type CompactSnapshotHook = Arc<dyn Fn(&Path) + Send + Sync>;
+
+#[cfg(test)]
+static COMPACT_SNAPSHOT_HOOK: Mutex<Option<CompactSnapshotHook>> = Mutex::new(None);
+
+#[cfg(test)]
+fn set_compact_snapshot_hook(hook: Option<CompactSnapshotHook>) {
+    *COMPACT_SNAPSHOT_HOOK.lock().expect("hook mutex poisoned") = hook;
+}
+
+#[cfg(test)]
+fn run_compact_snapshot_hook(index_path: &Path) {
+    // Clone the callback out before invoking it so the hook slot is not held while
+    // the test blocks inside it.
+    let hook = COMPACT_SNAPSHOT_HOOK
+        .lock()
+        .expect("hook mutex poisoned")
+        .clone();
+    if let Some(hook) = hook {
+        hook(index_path);
     }
 }
 
@@ -2331,6 +2408,8 @@ mod tests {
     // runs — the same concern AGENTS.md flags for config_command_allow_shell_*.
 
     static CODEWHALE_HOME_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// Serializes tests that install the global compaction interleaving hook.
+    static COMPACT_HOOK_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     struct CodeWhaleHomeGuard {
         prior: Option<std::ffi::OsString>,
@@ -2501,6 +2580,83 @@ mod tests {
                 .expect("lookup must survive a corrupted line")
                 .as_deref(),
             Some("beta")
+        );
+    }
+
+    /// Regression: #4736 -- compaction is read-snapshot-then-rename. An append that
+    /// landed in that window was silently erased by the rename. Both paths now share
+    /// one cross-process lock, so the concurrent append must survive.
+    #[test]
+    fn concurrent_append_survives_compaction() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let _lock = COMPACT_HOOK_TEST_LOCK.lock().unwrap();
+        let store = temp_state_store("session-index-compact-race");
+        let index_path = store.session_index_path.clone();
+
+        // Fill just under the compaction threshold so the next append compacts.
+        for idx in 0..=session_index_compact_line_threshold() {
+            store
+                .append_thread_name(
+                    &format!("filler-{idx}"),
+                    Some(format!("f{idx}")),
+                    idx as i64,
+                    None,
+                )
+                .expect("append filler");
+        }
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let hook_path = index_path.clone();
+        // Fire for the *first* compaction only: the racing append triggers a compaction
+        // of its own, and parking both inside the window at once would make the
+        // interleaving nondeterministic.
+        let armed = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        set_compact_snapshot_hook(Some(Arc::new(move |path: &Path| {
+            if path != hook_path || !armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            // Announce that we are parked in the snapshot->rename window, then hold it
+            // open long enough for the racing appender to get there.
+            let _ = started_tx.send(());
+            std::thread::sleep(Duration::from_millis(600));
+        })));
+
+        let compactor_store = store.clone();
+        let compactor = std::thread::spawn(move || {
+            compactor_store
+                .append_thread_name("compaction-trigger", Some("trigger".to_string()), 900, None)
+                .expect("append that triggers compaction");
+        });
+
+        started_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("compaction should have reached the snapshot window");
+
+        let racer_store = store.clone();
+        let racer = std::thread::spawn(move || {
+            // Deliberately non-fatal: the failure this test guards is the *silent* loss
+            // of a successfully-appended entry, so let the assertion below be what fails.
+            let _ = racer_store.append_thread_name(
+                "racing-thread",
+                Some("racer".to_string()),
+                950,
+                None,
+            );
+        });
+
+        compactor.join().expect("compactor thread");
+        racer.join().expect("racer thread");
+        set_compact_snapshot_hook(None);
+
+        assert_eq!(
+            store
+                .find_thread_name_by_id("racing-thread")
+                .expect("lookup racing thread")
+                .as_deref(),
+            Some("racer"),
+            "an append concurrent with compaction must not be erased by the rename"
         );
     }
 }

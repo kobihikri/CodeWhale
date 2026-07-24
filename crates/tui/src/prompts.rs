@@ -21,6 +21,9 @@ pub(crate) mod text;
 pub struct PromptSessionContext<'a> {
     pub user_memory_block: Option<&'a str>,
     pub goal_objective: Option<&'a str>,
+    /// Include the deterministic project context pack in the stable prefix.
+    /// Defaults to `false` since 0.9.2 (#4781); mirror
+    /// `Config::project_context_pack_enabled` when constructing this.
     pub project_context_pack_enabled: bool,
     /// Resolved BCP-47 locale tag for the `## Environment` block in
     /// the system prompt (e.g. `"en"`, `"zh-Hans"`, `"ja"`). The
@@ -60,7 +63,7 @@ impl Default for PromptSessionContext<'_> {
         Self {
             user_memory_block: None,
             goal_objective: None,
-            project_context_pack_enabled: true,
+            project_context_pack_enabled: false,
             locale_tag: "en",
             translation_enabled: false,
             model_id: "codewhale",
@@ -1061,7 +1064,7 @@ pub fn system_prompt_for_mode_with_context_and_skills(
         PromptSessionContext {
             user_memory_block,
             goal_objective: None,
-            project_context_pack_enabled: true,
+            project_context_pack_enabled: false,
             locale_tag: "en",
             translation_enabled: false,
             model_id: "codewhale",

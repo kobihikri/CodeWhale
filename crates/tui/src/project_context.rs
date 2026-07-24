@@ -14,10 +14,11 @@
 //! block. The loaded content is injected into the system prompt to give the
 //! agent context about the project's conventions, structure, and requirements.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -77,19 +78,24 @@ const GLOBAL_INSTRUCTIONS_RELATIVE_PATH: &[&str] = &[".codewhale", "instructions
 const GLOBAL_INSTRUCTIONS_VENDOR_NEUTRAL_PATH: &[&str] = &[".agents", "instructions.md"];
 const GLOBAL_INSTRUCTIONS_LEGACY_PATH: &[&str] = &[".deepseek", "instructions.md"];
 
-/// Maximum size for project context files (to prevent loading huge files)
-const MAX_CONTEXT_SIZE: usize = 100 * 1024; // 100KB
+/// Maximum size for a single project context file.
+///
+/// 16 KB (#4781). The previous 100 KB ceiling was a "prevent absurdity" guard,
+/// not a budget: 100 KB of prose is ~25k tokens injected into every turn's
+/// stable prefix. 16 KB is ~4k tokens, which is already a long AGENTS.md.
+const MAX_CONTEXT_SIZE: usize = 16 * 1024; // 16 KB
 
 /// Maximum number of rule files loaded per rules directory.
 /// Prevents a project from silently injecting hundreds of rule files.
 const MAX_RULES_FILES: usize = 50;
 
 /// Maximum total bytes across the assembled rules_block.
-/// 50 files × 100 KB per file could reach ~5 MB; this caps the
-/// cumulative injected content so a large rules directory can't
-/// dominate the context window. Exceeded bytes are truncated with
-/// an explicit marker.
-const MAX_RULES_BLOCK_BYTES: usize = 500 * 1024; // 500 KB
+///
+/// 32 KB (#4781) — twice the single-file cap, because a rules directory is
+/// legitimately several files. The previous 500 KB ceiling was ~125k tokens,
+/// larger than most context windows. Exceeded bytes are truncated with an
+/// explicit marker and a user-visible warning.
+const MAX_RULES_BLOCK_BYTES: usize = 32 * 1024; // 32 KB
 const PACK_README_MAX_CHARS: usize = 4_000;
 const PACK_MAX_ENTRIES: usize = 220;
 const PACK_MAX_SOURCE_FILES: usize = 60;
@@ -370,9 +376,9 @@ fn discover_repo_constitution(workspace: &Path) -> Option<(PathBuf, RepoConstitu
             path.push(component);
         }
         if context_candidate_exists(&path) {
-            let constitution = load_context_file(&path)
+            let constitution = load_context_file(&path, OversizePolicy::Reject)
                 .ok()
-                .and_then(|raw| serde_json::from_str::<RepoConstitution>(&raw).ok())?;
+                .and_then(|raw| serde_json::from_str::<RepoConstitution>(&raw.content).ok())?;
             return Some((path, constitution));
         }
         if let Some(ref root) = git_root
@@ -526,8 +532,8 @@ fn load_repo_constitution_block(
             path.push(component);
         }
         if context_candidate_exists(&path) {
-            match load_context_file(&path) {
-                Ok(raw) => match serde_json::from_str::<RepoConstitution>(&raw) {
+            match load_context_file(&path, OversizePolicy::Reject) {
+                Ok(raw) => match serde_json::from_str::<RepoConstitution>(&raw.content) {
                     Ok(constitution) if !constitution.is_empty() => {
                         if let Some(version) = constitution.schema_version
                             && version != SUPPORTED_CONSTITUTION_SCHEMA
@@ -862,14 +868,17 @@ pub fn load_project_context(workspace: &Path) -> ProjectContext {
         let file_path = workspace.join(filename);
 
         if context_candidate_exists(&file_path) {
-            match load_context_file(&file_path) {
-                Ok(content) => {
+            match load_context_file(&file_path, OversizePolicy::Truncate) {
+                Ok(loaded) => {
                     tracing::info!(
                         "Loaded project context from {} ({} bytes)",
                         file_path.display(),
-                        content.len()
+                        loaded.content.len()
                     );
-                    ctx.instructions = Some(content);
+                    if let Some(warning) = loaded.truncation_warning {
+                        ctx.warnings.push(warning);
+                    }
+                    ctx.instructions = Some(loaded.content);
                     ctx.source_path = Some(file_path);
                     break;
                 }
@@ -889,7 +898,8 @@ pub fn load_project_context(workspace: &Path) -> ProjectContext {
     // workspace-contained content only, no absolute-path escape.
     let mut rules_content = String::new();
     for rules_dir in RULES_DIRS {
-        let rules = load_rules_from_dir(workspace, rules_dir);
+        let (rules, rule_warnings) = load_rules_from_dir(workspace, rules_dir);
+        ctx.warnings.extend(rule_warnings);
         for (path, content) in rules {
             if !rules_content.is_empty() {
                 rules_content.push('\n');
@@ -905,18 +915,26 @@ pub fn load_project_context(workspace: &Path) -> ProjectContext {
     if !rules_content.is_empty() {
         // Cap total rules bytes so a large rules dir can't dominate the context window
         if rules_content.len() > MAX_RULES_BLOCK_BYTES {
-            let mut end = MAX_RULES_BLOCK_BYTES;
-            while !rules_content.is_char_boundary(end) {
-                end -= 1;
-            }
-            rules_content.truncate(end);
-            rules_content.push_str("\n\n[…rules block truncated at 500 KB…]");
+            let total_bytes = rules_content.len();
+            truncate_to_bytes(&mut rules_content, MAX_RULES_BLOCK_BYTES);
+            rules_content.push_str(&format!(
+                "\n\n[…rules block truncated at {} KB…]",
+                MAX_RULES_BLOCK_BYTES / 1024
+            ));
+            let warning = format!(
+                "Project rules total {} KB; only the first {} KB is loaded into the prompt. \
+                 The rest is not being read — trim or remove rule files.",
+                total_bytes.div_ceil(1024),
+                MAX_RULES_BLOCK_BYTES / 1024,
+            );
             tracing::warn!(
                 target: "project_context",
-                total_bytes = rules_content.len(),
+                total_bytes,
                 cap = MAX_RULES_BLOCK_BYTES,
                 "Truncating rules block to total byte budget"
             );
+            push_context_notice(&warning);
+            ctx.warnings.push(warning);
         }
         ctx.rules_block = Some(rules_content);
     }
@@ -1229,10 +1247,13 @@ fn load_global_agents_context(workspace: &Path, home_dir: Option<&Path>) -> Opti
         let path = join_relative_components(home, candidate);
 
         if context_candidate_exists(&path) {
-            match load_context_file(&path) {
-                Ok(content) => {
+            match load_context_file(&path, OversizePolicy::Truncate) {
+                Ok(loaded) => {
                     let mut ctx = ProjectContext::empty(workspace.to_path_buf());
-                    ctx.instructions = Some(content);
+                    if let Some(warning) = loaded.truncation_warning {
+                        warnings.push(warning);
+                    }
+                    ctx.instructions = Some(loaded.content);
                     ctx.source_path = Some(path);
                     ctx.warnings = warnings;
                     return Some(ctx);
@@ -1264,8 +1285,89 @@ fn generate_ephemeral_context(workspace: &Path) -> Option<String> {
     ))
 }
 
+/// What `load_context_file` does with a file larger than [`MAX_CONTEXT_SIZE`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OversizePolicy {
+    /// Prose context (`AGENTS.md`, rule files). Keep the leading
+    /// `MAX_CONTEXT_SIZE` bytes and append a visible marker: losing the tail of
+    /// a long instructions file is recoverable, losing all of it is not.
+    Truncate,
+    /// Structured context (`.codewhale/constitution.json`). A truncated
+    /// document is not a smaller document, it is an invalid one — refuse it
+    /// whole so the caller reports "too large" rather than "parse error".
+    Reject,
+}
+
+/// A context file that was read successfully, plus the warning to surface if
+/// it had to be cut down to fit [`MAX_CONTEXT_SIZE`].
+#[derive(Debug)]
+struct LoadedContextFile {
+    content: String,
+    /// `Some` when the content was truncated. Callers must push this into
+    /// `ProjectContext::warnings` so it reaches `/context`; it is also queued
+    /// for a startup toast by [`push_context_notice`].
+    truncation_warning: Option<String>,
+}
+
+/// Process-wide queue of context-loading warnings that must reach the user's
+/// eyes, not just the tracing log. Modeled on `prompts::PROMPT_OVERRIDE_NOTICES`
+/// and drained by the TUI event loop.
+///
+/// Project context is reloaded on every prompt build, so the queue dedupes:
+/// each distinct message is announced at most once per process.
+static CONTEXT_NOTICES: LazyLock<Mutex<Vec<String>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+static CONTEXT_NOTICES_SEEN: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+fn push_context_notice(message: &str) {
+    let Ok(mut seen) = CONTEXT_NOTICES_SEEN.lock() else {
+        return;
+    };
+    if !seen.insert(message.to_string()) {
+        return;
+    }
+    drop(seen);
+    if let Ok(mut notices) = CONTEXT_NOTICES.lock() {
+        notices.push(message.to_string());
+    }
+}
+
+/// Drain queued project-context warnings for display. Returns empty once each
+/// distinct message has been taken.
+pub fn take_context_notices() -> Vec<String> {
+    CONTEXT_NOTICES
+        .lock()
+        .map(|mut notices| std::mem::take(&mut *notices))
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+fn reset_context_notices_for_test() {
+    if let Ok(mut seen) = CONTEXT_NOTICES_SEEN.lock() {
+        seen.clear();
+    }
+    if let Ok(mut notices) = CONTEXT_NOTICES.lock() {
+        notices.clear();
+    }
+}
+
+/// Truncate `content` to at most `cap` bytes on a char boundary.
+fn truncate_to_bytes(content: &mut String, cap: usize) {
+    if content.len() <= cap {
+        return;
+    }
+    let mut end = cap;
+    while !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    content.truncate(end);
+}
+
 /// Load a context file with size checking
-fn load_context_file(path: &Path) -> Result<String, ProjectContextError> {
+fn load_context_file(
+    path: &Path,
+    oversize: OversizePolicy,
+) -> Result<LoadedContextFile, ProjectContextError> {
     let metadata = fs::symlink_metadata(path).map_err(|source| ProjectContextError::Metadata {
         path: path.to_path_buf(),
         source,
@@ -1291,20 +1393,69 @@ fn load_context_file(path: &Path) -> Result<String, ProjectContextError> {
             path: path.to_path_buf(),
             source,
         })?;
-    if metadata.len() > MAX_CONTEXT_SIZE as u64 {
+    let size = metadata.len();
+    let oversized = size > MAX_CONTEXT_SIZE as u64;
+    if oversized && oversize == OversizePolicy::Reject {
         return Err(ProjectContextError::TooLarge {
             path: path.to_path_buf(),
-            size: metadata.len(),
+            size,
             max: MAX_CONTEXT_SIZE,
         });
     }
 
     let mut content = String::new();
-    file.read_to_string(&mut content)
-        .map_err(|source| ProjectContextError::Read {
+    let mut truncation_warning = None;
+
+    if oversized {
+        // Bounded read: never pull more than the cap into memory, which is
+        // what the old hard reject was really buying.
+        let mut buf = Vec::with_capacity(MAX_CONTEXT_SIZE);
+        file.take(MAX_CONTEXT_SIZE as u64)
+            .read_to_end(&mut buf)
+            .map_err(|source| ProjectContextError::Read {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        // The byte cap can land mid-codepoint; drop the partial tail.
+        let valid_up_to = match std::str::from_utf8(&buf) {
+            Ok(_) => buf.len(),
+            Err(err) => err.valid_up_to(),
+        };
+        buf.truncate(valid_up_to);
+        content = String::from_utf8(buf).map_err(|err| ProjectContextError::Read {
             path: path.to_path_buf(),
-            source,
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, err),
         })?;
+        content.push_str(&format!(
+            "\n\n[…{} truncated: only the first {} KB of {} KB is loaded into the prompt…]",
+            path.display(),
+            MAX_CONTEXT_SIZE / 1024,
+            size.div_ceil(1024),
+        ));
+        let warning = format!(
+            "Project context file {} is {} KB; only the first {} KB is loaded into the prompt. \
+             The rest is not being read — trim the file or split it into {}.",
+            path.display(),
+            size.div_ceil(1024),
+            MAX_CONTEXT_SIZE / 1024,
+            RULES_DIRS[0],
+        );
+        tracing::warn!(
+            target: "project_context",
+            path = %path.display(),
+            size,
+            cap = MAX_CONTEXT_SIZE,
+            "Truncating oversized project context file"
+        );
+        push_context_notice(&warning);
+        truncation_warning = Some(warning);
+    } else {
+        file.read_to_string(&mut content)
+            .map_err(|source| ProjectContextError::Read {
+                path: path.to_path_buf(),
+                source,
+            })?;
+    }
 
     // Basic validation
     if content.trim().is_empty() {
@@ -1313,7 +1464,10 @@ fn load_context_file(path: &Path) -> Result<String, ProjectContextError> {
         });
     }
 
-    Ok(content)
+    Ok(LoadedContextFile {
+        content,
+        truncation_warning,
+    })
 }
 
 fn context_candidate_exists(path: &Path) -> bool {
@@ -1326,9 +1480,13 @@ fn context_candidate_exists(path: &Path) -> bool {
 /// Scan a rules directory for `.md` files and load them in filename order.
 /// Missing or unreadable directories return an empty vec (no error).
 /// Each file is verified through `load_context_file` (size check, symlink safety).
-fn load_rules_from_dir(workspace: &Path, rules_dir_name: &str) -> Vec<(PathBuf, String)> {
+fn load_rules_from_dir(
+    workspace: &Path,
+    rules_dir_name: &str,
+) -> (Vec<(PathBuf, String)>, Vec<String>) {
     let rules_dir = workspace.join(rules_dir_name);
     let mut entries: Vec<(PathBuf, String)> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
 
     // Refuse a symlinked rules directory: the real .md files behind it
     // would pass per-file is_symlink checks and be read from outside the
@@ -1342,12 +1500,12 @@ fn load_rules_from_dir(workspace: &Path, rules_dir_name: &str) -> Vec<(PathBuf, 
             dir = %rules_dir.display(),
             "Refusing symlinked rules directory"
         );
-        return entries;
+        return (entries, warnings);
     }
 
     let dir_iter = match fs::read_dir(&rules_dir) {
         Ok(iter) => iter,
-        Err(_) => return entries,
+        Err(_) => return (entries, warnings),
     };
 
     let mut file_paths: Vec<PathBuf> = Vec::new();
@@ -1376,17 +1534,26 @@ fn load_rules_from_dir(workspace: &Path, rules_dir_name: &str) -> Vec<(PathBuf, 
             "Truncating rules directory to cap"
         );
         file_paths.truncate(MAX_RULES_FILES);
+        let warning = format!(
+            "{} contains {total} rule files; only the first {MAX_RULES_FILES} are loaded.",
+            rules_dir.display(),
+        );
+        push_context_notice(&warning);
+        warnings.push(warning);
     }
 
     for path in file_paths {
-        match load_context_file(&path) {
-            Ok(content) => {
+        match load_context_file(&path, OversizePolicy::Truncate) {
+            Ok(loaded) => {
                 tracing::info!(
                     "Loaded project rule from {} ({} bytes)",
                     path.display(),
-                    content.len()
+                    loaded.content.len()
                 );
-                entries.push((path, content));
+                if let Some(warning) = loaded.truncation_warning {
+                    warnings.push(warning);
+                }
+                entries.push((path, loaded.content));
             }
             Err(error) => {
                 tracing::warn!(
@@ -1399,7 +1566,7 @@ fn load_rules_from_dir(workspace: &Path, rules_dir_name: &str) -> Vec<(PathBuf, 
         }
     }
 
-    entries
+    (entries, warnings)
 }
 
 #[cfg(unix)]
@@ -1593,6 +1760,60 @@ mod tests {
 
         assert!(!ctx.has_instructions());
         assert!(ctx.source_path.is_none());
+    }
+
+    #[test]
+    fn oversized_agents_md_is_truncated_and_warns_instead_of_being_dropped() {
+        reset_context_notices_for_test();
+        let tmp = tempdir().expect("tempdir");
+        let agents_path = tmp.path().join("AGENTS.md");
+        // Multi-byte tail so the byte cap can land mid-codepoint.
+        let body = "é".repeat(MAX_CONTEXT_SIZE);
+        fs::write(&agents_path, &body).expect("write");
+
+        let ctx = load_project_context(tmp.path());
+
+        assert!(ctx.has_instructions(), "oversized file must still load");
+        let instructions = ctx.instructions.as_ref().expect("instructions");
+        assert!(
+            instructions.contains("truncated"),
+            "truncation marker missing: {instructions:.200}"
+        );
+        assert!(
+            instructions.len() < body.len(),
+            "content should have been cut down"
+        );
+        assert!(
+            ctx.warnings.iter().any(|w| w.contains("only the first")),
+            "expected a truncation warning, got {:?}",
+            ctx.warnings
+        );
+        let notices = take_context_notices();
+        assert!(
+            notices.iter().any(|n| n.contains("only the first")),
+            "truncation must be queued for the user, got {notices:?}"
+        );
+        // Deduped: the same message is announced at most once per process.
+        assert!(take_context_notices().is_empty());
+    }
+
+    #[test]
+    fn oversized_constitution_json_is_rejected_rather_than_truncated() {
+        let tmp = tempdir().expect("tempdir");
+        let dir = tmp.path().join(".codewhale");
+        fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("constitution.json");
+        let filler = "x".repeat(MAX_CONTEXT_SIZE);
+        fs::write(&path, format!("{{\"mission\":\"{filler}\"}}")).expect("write");
+
+        let error = load_context_file(&path, OversizePolicy::Reject).expect_err("must reject");
+        assert!(matches!(error, ProjectContextError::TooLarge { .. }));
+    }
+
+    #[test]
+    fn project_context_pack_is_opt_in_by_default() {
+        let config = crate::config::Config::default();
+        assert!(!config.project_context_pack_enabled());
     }
 
     #[test]
@@ -2883,7 +3104,7 @@ mod tests {
             MAX_RULES_BLOCK_BYTES
         );
         assert!(
-            rules.contains("truncated at 500 KB"),
+            rules.contains("truncated at 32 KB"),
             "truncation marker missing"
         );
     }

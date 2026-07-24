@@ -5341,8 +5341,12 @@ fn removed_context_per_model_table_is_ignored_for_compatibility() -> Result<()> 
 }
 
 #[test]
-fn project_context_pack_defaults_on_and_can_be_disabled() {
+fn project_context_pack_defaults_off_and_can_be_enabled() {
+    // Off by default since 0.9.2: the pack cost ~53% of the session prefix.
     let mut config = Config::default();
+    assert!(!config.project_context_pack_enabled());
+
+    config.context.project_pack = Some(true);
     assert!(config.project_context_pack_enabled());
 
     config.context.project_pack = Some(false);

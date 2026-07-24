@@ -1838,7 +1838,13 @@ pub struct ContextConfig {
     #[serde(default)]
     pub enabled: Option<bool>,
     /// Include a deterministic project context pack in the stable prompt
-    /// prefix. Default: true; set `[context] project_pack = false` to disable.
+    /// prefix.
+    ///
+    /// Default: `false` since 0.9.2 (#4781). The pack is a pretty-printed JSON
+    /// directory listing that measured ~7,550 tokens against this repo — 53% of
+    /// the whole session prefix — to describe a tree the model can enumerate in
+    /// one `File` call. It stays available because it genuinely helps models
+    /// with weak tool-calling: set `[context] project_pack = true` to opt in.
     #[serde(default)]
     pub project_pack: Option<bool>,
     /// Ignored (was: seam verbatim window).
@@ -5320,7 +5326,8 @@ impl Config {
 
     #[must_use]
     pub fn project_context_pack_enabled(&self) -> bool {
-        self.context.project_pack.unwrap_or(true)
+        // Off by default since 0.9.2 (#4781): opt-in, not opt-out.
+        self.context.project_pack.unwrap_or(false)
     }
 
     /// Return whether shell execution is allowed for noninteractive and

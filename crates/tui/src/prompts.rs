@@ -967,7 +967,7 @@ whole list: the user may override a fact, but no one may invent one. When
 guidance conflicts, the user's request this turn outranks this constitution,
 which outranks nearest-scope project law and instructions, which outrank
 standing user-global preferences, which outrank memory and previous-session
-handoffs. When in doubt, consult ### Whose word wins.";
+handoffs. When in doubt, consult ### Article II — Whose word wins.";
 
 pub fn compose_prompt() -> String {
     compose_prompt_with_approval_model_and_shell("codewhale")
@@ -1898,7 +1898,7 @@ start it",
             "authority recap must reference the Constitution"
         );
         assert!(
-            text.contains("consult ### Whose word wins"),
+            text.contains("consult ### Article II — Whose word wins"),
             "authority recap must point at 0.9.0's precedence section"
         );
     }

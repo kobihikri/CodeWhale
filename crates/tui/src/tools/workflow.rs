@@ -2177,8 +2177,14 @@ fn read_only_allowed_tools(agent_type: AgentType) -> &'static [&'static str] {
 fn is_write_or_shell_tool(tool: &str) -> bool {
     matches!(
         tool.trim(),
-        "write_file"
+        // Canonical model-visible names ("Write"/"Edit") must stay in sync with the
+        // internal snake_case names; a missing alias lets a read_only leaf request a
+        // write-capable tool and pass validation (#4730).
+        "Write"
+            | "Edit"
+            | "write_file"
             | "edit_file"
+            | "fim_edit"
             | "apply_patch"
             | "exec_shell"
             | "exec_shell_wait"
@@ -3966,6 +3972,32 @@ mod tests {
         assert!(body.contains("prove the report artifact"), "{body}");
         assert!(body.contains("phase: scan"), "{body}");
         assert!(body.contains("\"confirmed\": 2"), "{body}");
+    }
+
+    #[test]
+    fn read_only_leaf_rejects_every_spelling_of_a_write_tool() {
+        for tool in [
+            "write_file",
+            "edit_file",
+            "apply_patch",
+            "fim_edit",
+            "Write",
+            "Edit",
+        ] {
+            let spec: LeafSpec = serde_json::from_value(serde_json::json!({
+                "id": "leaf",
+                "prompt": "p",
+                "mode": "read_only",
+                "permissions": { "allowed_tools": [tool] },
+            }))
+            .expect("leaf spec");
+            let err = validate_leaf_runtime_contract(&spec)
+                .expect_err(&format!("{tool} must be rejected on a read_only leaf"));
+            assert!(
+                err.to_string().contains("write/shell allowed_tools"),
+                "{tool}: {err}"
+            );
+        }
     }
 
     #[test]

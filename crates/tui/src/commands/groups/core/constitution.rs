@@ -18,7 +18,7 @@ use super::CommandResult;
 pub(in crate::commands) const COMMAND_INFO: CommandInfo = CommandInfo {
     name: "constitution",
     aliases: &["law"],
-    usage: "/constitution [status|preview|bundled|edit|review|repair|repo|explain|posture|help]",
+    usage: "/constitution [status|text|preview|bundled|edit|review|repair|repo|explain|posture|help]",
     description_id: MessageId::CmdConstitutionDescription,
 };
 
@@ -33,6 +33,10 @@ impl RegisterCommand for ConstitutionCmd {
         match arg.map(str::trim).filter(|arg| !arg.is_empty()) {
             None | Some("status" | "home" | "manager") => {
                 open_status(app);
+                CommandResult::ok()
+            }
+            Some("text" | "base" | "effective" | "source" | "read") => {
+                open_effective_base_prompt(app);
                 CommandResult::ok()
             }
             Some("preview") => {
@@ -91,6 +95,35 @@ fn open_review(app: &mut App) {
     open_pager(app, review_title(locale), &text);
 }
 
+/// `/constitution text` — render the EFFECTIVE base prompt (the global
+/// Constitution that actually reaches the model) with its provenance (#3928).
+///
+/// This is the only surface that answers "which Constitution am I running?".
+/// `preview` shows the *user-global* amendments block; this shows the law
+/// itself, bundled or overridden.
+fn open_effective_base_prompt(app: &mut App) {
+    let locale = app.ui_locale;
+    let text = effective_base_prompt_text(locale);
+    open_pager(app, effective_title(locale), &text);
+}
+
+/// Provenance header + the exact effective Constitution text.
+fn effective_base_prompt_text(locale: Locale) -> String {
+    let provenance = crate::prompt_provenance::current();
+    let (source_header, hint) = match locale {
+        Locale::ZhHans => ("来源", "以下为实际发送给模型的准则全文。"),
+        _ => (
+            "Source",
+            "The exact text below is what is sent to the model.",
+        ),
+    };
+    format!(
+        "{source_header}: {}\n{hint}\n\n{}",
+        provenance.description(),
+        crate::prompts::effective_base_prompt_text().trim(),
+    )
+}
+
 fn open_preview(app: &mut App) {
     let locale = app.ui_locale;
     let text = preview_text(locale);
@@ -133,7 +166,15 @@ fn format_status(app: &App, locale: Locale) -> String {
     let _ = writeln!(out, "{}", copy.manager_header);
     out.push('\n');
     let _ = writeln!(out, "{}", copy.active_stack_header);
-    let _ = writeln!(out, "- {}", copy.bundled_active);
+    // #3928: the base-law line must say WHICH Constitution is in force, not
+    // just that one is. `/constitution text` prints the full text.
+    let base_provenance = crate::prompt_provenance::current();
+    if base_provenance.is_bundled_in_force() {
+        let _ = writeln!(out, "- {}", copy.bundled_active);
+    } else {
+        let _ = writeln!(out, "- {}", copy.override_active);
+    }
+    let _ = writeln!(out, "  - {}", base_provenance.description());
     let _ = writeln!(
         out,
         "- {}: {}",
@@ -560,10 +601,11 @@ fn ignored_whale_warnings(warnings: &[String]) -> Vec<&str> {
 fn help_text(locale: Locale) -> String {
     match locale {
         Locale::ZhHans => "\
-用法：/constitution [status|preview|bundled|edit|review|repair|repo|explain|posture|help]
+用法：/constitution [status|text|preview|bundled|edit|review|repair|repo|explain|posture|help]
 
 常用命令：
 - /constitution：打开协作准则管理器和当前层级。
+- /constitution text：显示实际生效的准则全文及其来源（内置 / 配置目录覆盖 / 宿主程序覆盖）。
 - /constitution preview：显示会注入模型的确切用户全局协作准则块；缺失、空、无效或不可读时显示修复说明。
 - /constitution edit：打开 /setup 的引导式协作准则步骤；用 1-6 调整，按 G 预览，再按 G 保存。
 - /constitution repair：说明当前文件状态，然后打开同一个引导式修复步骤。
@@ -572,10 +614,11 @@ fn help_text(locale: Locale) -> String {
 - /constitution explain：解释内置基础准则、用户全局协作准则、仓库协作准则、AGENTS.md、记忆和交接的区别。
 - /constitution posture：打开运行时姿态；协作准则只提供模型指导，不会更改批准、沙盒、Shell、网络、信任或 MCP 权限。",
         _ => "\
-Usage: /constitution [status|preview|bundled|edit|review|repair|repo|explain|posture|help]
+Usage: /constitution [status|text|preview|bundled|edit|review|repair|repo|explain|posture|help]
 
 Common commands:
 - /constitution: open the constitution manager and active stack.
+- /constitution text: show the exact Constitution in force and where it came from (bundled, config-dir override, or embedder override).
 - /constitution preview: show the exact user-global constitution block that would be injected; missing, empty, invalid, or unreadable files show repair guidance instead.
 - /constitution edit: open the guided /setup Constitution step; tune 1-6, press G to preview, then G again to save.
 - /constitution repair: explain the current file state, then open the same guided repair step.
@@ -648,6 +691,13 @@ fn review_title(locale: Locale) -> &'static str {
     match locale {
         Locale::ZhHans => "协作准则检查",
         _ => "Constitution Review",
+    }
+}
+
+fn effective_title(locale: Locale) -> &'static str {
+    match locale {
+        Locale::ZhHans => "生效中的协作准则",
+        _ => "Effective Constitution",
     }
 }
 
@@ -795,6 +845,7 @@ struct ConstitutionManagerCopy {
     manager_header: &'static str,
     active_stack_header: &'static str,
     bundled_active: &'static str,
+    override_active: &'static str,
     user_global_label: &'static str,
     repo_local_label: &'static str,
     agents_label: &'static str,
@@ -834,6 +885,7 @@ impl ConstitutionManagerCopy {
                 manager_header: "协作准则管理器",
                 active_stack_header: "生效层级",
                 bundled_active: "内置基础准则：始终生效",
+                override_active: "自定义基础准则覆盖：已生效（内置准则未生效）",
                 user_global_label: "用户全局协作准则",
                 repo_local_label: "仓库本地协作准则",
                 agents_label: "AGENTS/项目说明",
@@ -878,6 +930,7 @@ impl ConstitutionManagerCopy {
                 manager_header: "Constitution Manager",
                 active_stack_header: "Active stack",
                 bundled_active: "Bundled Constitution: active base law (always on)",
+                override_active: "Custom Constitution override: ACTIVE (bundled base law is not in force)",
                 user_global_label: "User-global constitution",
                 repo_local_label: "Repo-local constitution",
                 agents_label: "AGENTS/project instructions",
@@ -986,6 +1039,70 @@ mod tests {
             .downcast_mut::<PagerView>()
             .expect("top view should be pager");
         pager.body_text()
+    }
+
+    /// #3928 acceptance: `/constitution text` shows the exact effective text
+    /// and its source.
+    #[test]
+    fn constitution_text_opens_effective_base_prompt_with_provenance() {
+        let mut app = test_app();
+        app.ui_locale = Locale::En;
+
+        let result = ConstitutionCmd::execute(&mut app, Some("text"));
+
+        assert!(result.message.is_none());
+        assert_eq!(app.view_stack.top_kind(), Some(ModalKind::Pager));
+        let body = pop_pager_body(&mut app);
+        assert!(
+            body.contains("Source:"),
+            "missing provenance header: {body}"
+        );
+        // The exact effective text, not a summary.
+        let effective = crate::prompts::effective_base_prompt_text().trim();
+        let head: String = effective.lines().take(1).collect();
+        assert!(
+            body.contains(head.trim()),
+            "pager body should contain the effective base prompt"
+        );
+    }
+
+    #[test]
+    fn constitution_text_aliases_all_open_the_pager() {
+        for alias in ["base", "effective", "source", "read"] {
+            let mut app = test_app();
+            app.ui_locale = Locale::En;
+            let result = ConstitutionCmd::execute(&mut app, Some(alias));
+            assert!(!result.is_error, "alias {alias} should be accepted");
+            assert_eq!(
+                app.view_stack.top_kind(),
+                Some(ModalKind::Pager),
+                "alias {alias} should open the pager"
+            );
+        }
+    }
+
+    #[test]
+    fn constitution_help_and_usage_mention_text_subcommand() {
+        assert!(COMMAND_INFO.usage.contains("text"));
+        assert!(help_text(Locale::En).contains("/constitution text"));
+        assert!(help_text(Locale::ZhHans).contains("/constitution text"));
+    }
+
+    /// #3928: the manager's base-law line must state which Constitution is in
+    /// force, not merely that one exists.
+    #[test]
+    fn constitution_manager_reports_base_prompt_provenance() {
+        let mut app = test_app();
+        app.ui_locale = Locale::En;
+
+        ConstitutionCmd::execute(&mut app, None);
+
+        let body = pop_pager_body(&mut app);
+        let provenance = crate::prompt_provenance::current();
+        assert!(
+            body.contains(&provenance.description()),
+            "manager should describe base prompt provenance: {body}"
+        );
     }
 
     #[test]

@@ -659,6 +659,22 @@ fn effective_base_prompt() -> &'static str {
     effective_prompt_override(&BASE_PROMPT_OVERRIDE, BASE_PROMPT)
 }
 
+// ── #3928 provenance accessors ──
+// Deliberately minimal read-only windows onto the base-prompt override cell,
+// so `crate::prompt_provenance` can report which Constitution is in force
+// without this module growing any UI knowledge.
+
+/// Whether the base prompt has been replaced by an override (config-dir or
+/// embedder). `false` means the compiled-in `BASE_PROMPT` is in force.
+pub(crate) fn base_prompt_override_active() -> bool {
+    BASE_PROMPT_OVERRIDE.get().is_some()
+}
+
+/// The base prompt text that actually reaches the model, override included.
+pub(crate) fn effective_base_prompt_text() -> &'static str {
+    effective_base_prompt()
+}
+
 fn effective_static_prompt_composer() -> Option<&'static StaticPromptComposer> {
     STATIC_PROMPT_COMPOSER.get().map(Box::as_ref)
 }

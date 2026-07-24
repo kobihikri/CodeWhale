@@ -857,6 +857,34 @@ fn surface_prompt_override_notices(app: &mut App) {
         });
         app.push_status_toast(notice, StatusToastLevel::Warning, Some(12_000));
     }
+    surface_base_prompt_provenance(app, crate::prompt_provenance::current());
+}
+
+/// Announce a non-bundled Constitution at startup (#3928).
+///
+/// The gated-off case is already reported through the notice queue above. The
+/// case this covers is the opposite one: an override IS in force, and until
+/// now the only signal was a `tracing::info` nobody reads. Running under a
+/// replaced global Constitution must never be invisible.
+///
+/// Takes the resolved provenance rather than reading it, so the visible
+/// behaviour can be tested without installing a process-global override.
+fn surface_base_prompt_provenance(
+    app: &mut App,
+    provenance: crate::prompt_provenance::BasePromptProvenance,
+) {
+    if provenance.is_bundled_in_force() {
+        // Bundled is the default; saying so every launch would be noise.
+        return;
+    }
+    let content = format!(
+        "{} Run /constitution text to read it.",
+        provenance.description()
+    );
+    app.add_message(HistoryCell::System {
+        content: content.clone(),
+    });
+    app.push_status_toast(content, StatusToastLevel::Info, Some(12_000));
 }
 
 /// Run the interactive TUI event loop.

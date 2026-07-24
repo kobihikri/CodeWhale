@@ -1594,10 +1594,7 @@ mod tests {
             // folds tone in — no per-model id line, no separate personality
             // section in default_layers.
             assert!(ctx.default_layers.contains("You are Codewhale"));
-            assert!(
-                ctx.default_layers
-                    .contains("Take the work seriously. Don't take")
-            );
+            assert!(ctx.default_layers.contains("### Article I — Ground truth"));
             assert!(!ctx.default_layers.contains("## Core Tool Taxonomy"));
             assert!(!ctx.default_layers.contains("Approval Policy"));
             "embedder static prompt".to_string()
@@ -1959,20 +1956,39 @@ start it",
         }
     }
 
+    /// `BASE_PROMPT` is the one block resident in *every* session, so growth
+    /// here is paid on every turn of every conversation. It silently grew
+    /// 1,533 → 1,920 tokens during the 0.9.0 Articles rewrite; nothing caught
+    /// it, because nothing was watching. The 0.9.2 blue-ocean cut took it to
+    /// ~816 by deleting every effort/method section.
+    ///
+    /// This ceiling is the guard that was missing. It uses the same 4.0
+    /// chars/token convention the release measured with. If you are here
+    /// because this test failed, the question is not "what should the ceiling
+    /// be" — it is whether the text you just added allocates authority (keep
+    /// it, and raise this deliberately) or tells the model how hard to try
+    /// (delete it).
+    #[test]
+    fn base_prompt_stays_under_its_token_ceiling() {
+        const CHARS_PER_TOKEN: usize = 4;
+        const CEILING_TOKENS: usize = 900;
+        let approx_tokens = BASE_PROMPT.len() / CHARS_PER_TOKEN;
+        assert!(
+            approx_tokens <= CEILING_TOKENS,
+            "BASE_PROMPT is ~{approx_tokens} tokens ({} chars), over the {CEILING_TOKENS}-token \
+             ceiling. It ships in every session on every turn. Raising this ceiling is a \
+             deliberate decision, not a fix for a red build.",
+            BASE_PROMPT.len()
+        );
+    }
+
     #[test]
     fn base_prompt_carries_constitutional_core() {
         for phrase in [
             "## Codewhale",
             "You are Codewhale",
             "The A is already yours",
-            "Let the work speak",
             "### Article I — Ground truth",
-            "### Do what's asked",
-            "### Keep momentum",
-            "### Think in causes",
-            "### Honor constraints before preferences",
-            "### Restraint",
-            "### Leave continuity",
             "### Article II — Whose word wins",
             "### Article III — Limits on delegation",
             "### Article IV — Unresolved conflict",
@@ -1987,17 +2003,31 @@ start it",
 
     #[test]
     fn base_prompt_carries_balanced_behavioral_priors() {
-        for phrase in [
-            "action is the default",
-            "Autonomy has a boundary",
-            "Hold more than one plausible cause",
-            "Hard constraints are gates",
-            "mechanism carries it",
-            "so the next turn can continue",
-        ] {
+        for phrase in ["mechanism carries it"] {
             assert!(
                 BASE_PROMPT.contains(phrase),
                 "BASE_PROMPT missing behavioral prior {phrase:?}"
+            );
+        }
+        // 0.9.2 blue-ocean cut: the constitution allocates authority and says
+        // nothing about effort. Every section that set an effort level or
+        // taught a method — "Do what's asked", "Keep momentum", "Think in
+        // causes", "Honor constraints before preferences", "Skill and role
+        // constraints are binding", "Restraint", "Leave continuity" — was
+        // deleted deliberately. Assert they stay gone; re-adding one is the
+        // regrowth that took BASE_PROMPT from 1,533 to 1,920 tokens.
+        for banned in [
+            "### Do what's asked",
+            "### Keep momentum",
+            "### Think in causes",
+            "### Honor constraints before preferences",
+            "### Skill and role constraints are binding",
+            "### Restraint",
+            "### Leave continuity",
+        ] {
+            assert!(
+                !BASE_PROMPT.contains(banned),
+                "effort/method section {banned:?} must stay deleted (0.9.2 blue-ocean cut)"
             );
         }
         assert!(
@@ -2022,7 +2052,7 @@ start it",
             .find("3. Project law and instructions")
             .expect("project tier present");
         let preference_at = BASE_PROMPT
-            .find("4. Your standing user-global preferences.")
+            .find("4. Your standing user-global preferences")
             .expect("user-global preference tier present");
         let memory_at = BASE_PROMPT
             .find("5. Memory and previous-session handoffs.")
@@ -3107,12 +3137,6 @@ start it",
         for needle in [
             "## Codewhale",
             "### Article I — Ground truth",
-            "### Do what's asked",
-            "### Keep momentum",
-            "### Think in causes",
-            "### Honor constraints before preferences",
-            "### Restraint",
-            "### Leave continuity",
             "### Article II — Whose word wins",
             "### Article III — Limits on delegation",
             "### Article IV — Unresolved conflict",
@@ -3196,7 +3220,7 @@ start it",
         assert!(!prompt.contains("Approval Policy:"));
         // Base prompt carries the 0.9.0 compact Constitution.
         assert!(prompt.contains("You are Codewhale"));
-        assert!(prompt.contains("Take the work seriously. Don't take"));
+        assert!(prompt.contains("### Article I — Ground truth"));
     }
 
     #[test]
@@ -3284,7 +3308,7 @@ start it",
             calm, playful,
             "personality enum is a no-op — both produce identical output"
         );
-        assert!(calm.contains("Take the work seriously. Don't take"));
+        assert!(calm.contains("### Article I — Ground truth"));
         assert!(calm.contains("You are Codewhale"));
     }
 
@@ -3698,9 +3722,7 @@ start it",
     fn preamble_carries_tone_and_ownership_guidance() {
         let prompt = compose_prompt();
         assert!(prompt.contains("The A is already yours"));
-        assert!(prompt.contains("Your competence is a settled fact"));
-        assert!(prompt.contains("Take the work seriously. Don't take"));
-        assert!(prompt.contains("Let the work speak"));
+        assert!(prompt.contains("### Article I — Ground truth"));
     }
 
     // ── Cache-prefix stability harness (#263 step 2) ───────────────────────

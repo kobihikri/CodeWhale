@@ -413,7 +413,8 @@ impl RepoConstitution {
         let mut body = String::new();
         if let Some(authority) = self.authority.as_ref().filter(|a| !a.is_empty()) {
             body.push_str(
-                "When local sources conflict, trust them in this order (highest first):\n",
+                "Authority ordering this repo operates under, restated from Article II, \
+                 which governs (highest first):\n",
             );
             for (idx, item) in authority.iter().enumerate() {
                 body.push_str(&format!("{}. {item}\n", idx + 1));

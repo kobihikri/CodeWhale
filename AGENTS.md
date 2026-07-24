@@ -64,57 +64,16 @@
 
 ## Filing and closing issues
 
-A triage of all 115 open v0.9.2 issues against the actual code found the
-backlog's problem is its **error rate, not its size**: at least 10 described
-work that no longer existed, and several asserted things about the code that
-were never true. The rules below are the patterns that cost the most time,
-worst first. Each is grounded in a real issue.
+Issue hygiene rules live in [CONTRIBUTING.md](CONTRIBUTING.md#reporting-issues).
+Two that bind agents specifically:
 
-- **Update the issue body in the PR that partially satisfies it.** Half-stale
-  bodies are worse than fully stale ones, because a reader trusts the parts
-  that still look plausible. #4779 was 100% done and still open. #3928's
-  Evidence section asserted "No `/constitution` command exists" (it did) and a
-  hardcoded path that no longer existed. Strike satisfied acceptance criteria
-  and delete now-false Evidence lines in the same PR. An issue body is a live
-  document, not a filing record.
-- **Paste quoted code from the file; never reconstruct it from memory.**
-  #4730's entire premise was that two allowlists had drifted, and it quoted a
-  function as containing `"Edit"` that never did — there were four drifting
-  allowlists, and the issue named neither of the two files holding the real
-  reference set. #4778 asked for deletion of an assertion on a constant that
-  does not exist.
-- **Cite `crate/path/from/root.rs::symbol`, not a bare line range.** Line
-  numbers rot within weeks; every author-filed issue in one triage batch needed
-  a re-grep. A bare line range is acceptable only next to a commit SHA.
-- **One issue must be closable by exactly one merged change.** If you cannot
-  name the single PR that closes it, split it. If two issues would be closed by
-  the same PR, merge them first — commit `c86436b54` closed #4740, #4726 and
-  #4725 at once, so those were one piece of work filed three times. Conversely
-  #4797 bundles six independent defects and can therefore only ever rot.
-- **Dependency lives in structure, not prose.** Use a task list on the parent
-  or the epic label; write `blocks #N` / `supersedes #N`, never a bare
-  "Related:". A child inherits its parent's milestone — #3947 sat in v0.9.2
-  while its declared parent sat in v0.9.3, which is a bug to fix rather than a
-  state to keep.
-- **Every acceptance criterion must name a condition an outsider can check.**
-  "Confirm X gets the same care as Y" and "don't let it regress" are not
-  criteria. Keep verification commands that pass on `main` today separate from
-  commands the issue is asking you to create — #4787 listed
-  `npm run check:locales` as verification when building that script *was* the
-  ask, i.e. a check that cannot fail.
-- **Before filing anything as "cause unknown," paste the failing log line.**
-  #4793 was filed as undiagnosed; the cause was one unformatted call site
-  plainly visible in the CI log nobody had opened.
-- **Design rationale must be reachable from a checkout.** Several issues point
-  at an external drive or a private sibling repo. Inline the relevant
-  paragraphs or commit the design doc.
+- A PR that lands **any part** of an issue edits that issue's body in the same
+  PR — strike satisfied criteria, delete now-false Evidence lines. Half-stale
+  bodies cost more than stale ones because the plausible parts get trusted.
+- Never close an issue as already-done without citing the `file:line` that
+  proves it. "Looks implemented" is how live work gets silently lost.
 
-Two mechanical traps when triaging with `gh`: `gh issue view N --comments`
-returned empty for a whole batch, and `gh issue view` inside a shell `for` loop
-returned empty on every iteration — only bare single calls worked. A scripted
-sweep silently gets zero bodies, which is exactly how a wrong "already fixed"
-gets written. And when closing as already-done, cite the `file:line` proving
-it; "looks implemented" is how live work gets silently lost.
+Treat an issue body as a claim to verify, not a description to trust.
 
 ## CodeWhale Stewardship
 

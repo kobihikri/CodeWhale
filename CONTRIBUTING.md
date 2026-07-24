@@ -437,6 +437,52 @@ Issue reports should include:
 - Expected vs actual behavior
 - Relevant error messages or logs
 
+### Keeping issues true
+
+An issue is a claim about the code, and claims rot. These rules exist because
+a backlog whose bodies have drifted costs more to read than to re-derive from
+source.
+
+**Scope**
+
+- An issue must be closable by exactly one merged change. If you cannot name
+  the single PR that would close it, split it. If two issues would be closed by
+  the same PR, merge them before anyone starts work.
+- Dependency lives in structure, not prose: a task list on the parent, or the
+  epic label. Write `blocks #N` / `supersedes #N`, not a bare "Related:". A
+  child inherits its parent's milestone.
+
+**Evidence**
+
+- Paste quoted code from the file. Never reconstruct it from memory — a wrong
+  quote sends the implementer to the wrong place, and an issue whose premise is
+  false is worse than no issue.
+- Cite `crate/path/from/root.rs::symbol_name`. Line numbers rot within weeks; a
+  bare line range is acceptable only next to a commit SHA.
+- Before filing anything as "cause unknown," paste the actual failing log line.
+  The diagnosis is usually already in it.
+- Design rationale must be reachable from a checkout. Inline the relevant
+  paragraphs or commit the design doc — never link an external drive or a
+  private sibling repo.
+
+**Acceptance**
+
+- Every criterion must name a condition an outsider can check without asking
+  you. "Make sure X gets the same care as Y" and "don't let it regress" are not
+  criteria; if you cannot write a checkable condition, file a test or a spike.
+- Keep verification commands that pass today separate from commands the issue
+  asks you to create. Listing a script the issue is about building, as though
+  it already runs, is a check that cannot fail.
+
+**Maintenance**
+
+- A PR that lands *any part* of an issue edits that issue's body in the same
+  PR: strike the satisfied acceptance criteria, delete the now-false evidence.
+  A partially-satisfied body is more expensive than a stale one, because a
+  reader trusts the parts that still look plausible.
+- Close as already-done only with the `file:line` that proves it. "Looks
+  implemented" is how live work gets silently lost.
+
 ## Security
 
 If you discover a security vulnerability, please do **not** open a public issue.

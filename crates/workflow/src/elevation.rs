@@ -483,7 +483,18 @@ fn merge_permissions(
 fn is_write_tool(tool: &str) -> bool {
     matches!(
         tool,
-        "write_file" | "edit_file" | "apply_patch" | "checklist_write" | "todo_write"
+        // Canonical model-visible names ("Write"/"Edit"/"NotebookEdit") must stay in
+        // sync with the internal snake_case names; missing one silently under-reports
+        // write capability on the approval card (#4730).
+        "Write"
+            | "Edit"
+            | "NotebookEdit"
+            | "write_file"
+            | "edit_file"
+            | "fim_edit"
+            | "apply_patch"
+            | "checklist_write"
+            | "todo_write"
     )
 }
 
@@ -637,6 +648,20 @@ mod tests {
         assert!(elevation.writes);
         assert!(elevation.shell);
         assert!(elevation.reasons.iter().any(|r| r == "writes"));
+    }
+
+    #[test]
+    fn canonical_write_tool_names_flag_writes() {
+        for tool in ["Edit", "Write", "NotebookEdit", "fim_edit"] {
+            let mut editor = leaf("editor", TaskMode::ReadOnly);
+            editor.permissions.allowed_tools = vec![tool.to_string()];
+            let spec = spec_with(vec![WorkflowNode::Leaf(editor)], None);
+            let elevation = assess_workflow_elevation(&spec, ElevationOptions::default());
+            assert!(
+                elevation.writes,
+                "tool {tool} should be classified as a write: {elevation:?}"
+            );
+        }
     }
 
     #[test]

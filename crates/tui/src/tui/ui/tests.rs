@@ -11040,6 +11040,10 @@ fn prompt_override_notice_surfaces_in_transcript_and_toast() {
     std::fs::create_dir_all(&prompts_dir).expect("prompts dir");
     std::fs::write(prompts_dir.join("constitution.md"), "custom law\n").expect("override file");
     let _ = prompts::take_prompt_override_notices();
+    // The same surfacing path also drains project-context notices, which other
+    // tests in this process may have queued; clear them so the toast assertion
+    // below is order-independent.
+    let _ = crate::project_context::take_context_notices();
     assert!(prompts::load_config_dir_prompt_overrides(tmpdir.path()).is_empty());
 
     let mut app = create_test_app();
@@ -11055,13 +11059,16 @@ fn prompt_override_notice_surfaces_in_transcript_and_toast() {
         "expected system warning in transcript, got {:?}",
         app.history
     );
-    let toast = app.status_toasts.back().expect("warning toast");
+    let toast = app
+        .status_toasts
+        .iter()
+        .find(|toast| {
+            toast
+                .text
+                .contains(prompts::BASE_PROMPT_OVERRIDE_OPT_IN_ENV)
+        })
+        .expect("warning toast");
     assert_eq!(toast.level, StatusToastLevel::Warning);
-    assert!(
-        toast
-            .text
-            .contains(prompts::BASE_PROMPT_OVERRIDE_OPT_IN_ENV)
-    );
 }
 
 #[test]

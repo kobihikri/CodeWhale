@@ -848,7 +848,10 @@ async fn submit_keyless_onboarding_provider(
 }
 
 fn surface_prompt_override_notices(app: &mut App) {
-    for notice in prompts::take_prompt_override_notices() {
+    let notices = prompts::take_prompt_override_notices()
+        .into_iter()
+        .chain(crate::project_context::take_context_notices());
+    for notice in notices {
         app.add_message(HistoryCell::System {
             content: format!("Warning: {notice}"),
         });

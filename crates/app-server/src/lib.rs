@@ -126,6 +126,81 @@ struct AppState {
     /// `request_id`. A driver polls this to resolve clarification questions
     /// raised by the model during a headless run.
     pending_user_input: Arc<Mutex<std::collections::HashMap<String, PendingUserInputAnswers>>>,
+    /// Handle to the stdio turn currently streaming, if any.
+    ///
+    /// Deliberately guarded by its own mutex (never the bridge mutex the
+    /// turn itself holds) so `thread/cancel` and `shutdown` can interrupt a
+    /// runaway turn while it is still in flight.
+    stdio_active_turn: ActiveTurnSlot,
+}
+
+/// Slot holding the in-flight stdio turn so it can be interrupted.
+type ActiveTurnSlot = Arc<Mutex<Option<ActiveTurn>>>;
+
+/// Everything needed to interrupt an in-flight runtime turn without
+/// touching the [`RuntimeBridge`] mutex that the turn is holding.
+#[derive(Clone)]
+struct ActiveTurn {
+    client: reqwest::Client,
+    base_url: String,
+    auth_token: Option<String>,
+    thread_id: String,
+    turn_id: String,
+}
+
+impl ActiveTurn {
+    async fn interrupt(&self) -> Result<()> {
+        let mut builder = self.client.post(format!(
+            "{}/v1/threads/{}/turns/{}/interrupt",
+            self.base_url, self.thread_id, self.turn_id
+        ));
+        if let Some(token) = self.auth_token.as_deref() {
+            builder = builder.bearer_auth(token);
+        }
+        builder.send().await?.error_for_status()?;
+        Ok(())
+    }
+}
+
+/// Clears the active-turn slot when the turn future finishes *or is
+/// dropped* (cancel/shutdown drop it mid-stream), so a stale handle can
+/// never be interrupted later.
+struct ActiveTurnGuard {
+    slot: ActiveTurnSlot,
+}
+
+impl Drop for ActiveTurnGuard {
+    fn drop(&mut self) {
+        if let Ok(mut slot) = self.slot.try_lock() {
+            *slot = None;
+        } else {
+            let slot = self.slot.clone();
+            tokio::spawn(async move {
+                *slot.lock().await = None;
+            });
+        }
+    }
+}
+
+/// Interrupt the in-flight stdio turn, if there is one.
+async fn cancel_active_stdio_turn(state: &AppState) -> Value {
+    let active = state.stdio_active_turn.lock().await.clone();
+    let Some(active) = active else {
+        return json!({"ok": true, "canceled": false});
+    };
+    match active.interrupt().await {
+        Ok(()) => json!({
+            "ok": true,
+            "canceled": true,
+            "turn_id": active.turn_id,
+        }),
+        Err(err) => json!({
+            "ok": false,
+            "canceled": false,
+            "turn_id": active.turn_id,
+            "error": err.to_string(),
+        }),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -272,13 +347,68 @@ fn app_router(state: AppState, cors_origins: &[String]) -> Router {
         .with_state(state)
 }
 
+/// How long a `shutdown` waits for an in-flight turn to unwind after it has
+/// been interrupted before the request future is dropped outright.
+const STDIO_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
+
+/// Control messages that must be honoured *while* a turn is streaming.
+enum StdioControl {
+    Cancel(Option<Value>),
+    Shutdown(Option<Value>),
+    Other,
+}
+
+fn classify_stdio_control(line: &str) -> StdioControl {
+    let Ok(request) = serde_json::from_str::<JsonRpcRequest>(line) else {
+        return StdioControl::Other;
+    };
+    match request.method.as_str() {
+        "thread/cancel" | "thread/interrupt" => StdioControl::Cancel(request.id),
+        "shutdown" => StdioControl::Shutdown(request.id),
+        _ => StdioControl::Other,
+    }
+}
+
+/// Read stdin on its own task so the dispatch loop can keep receiving
+/// `thread/cancel`/`shutdown` while a turn is streaming.
+fn spawn_stdio_line_reader<R>(reader: R) -> tokio::sync::mpsc::UnboundedReceiver<String>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(reader).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    rx
+}
+
 pub async fn run_stdio(config_path: Option<PathBuf>) -> Result<()> {
     let state = build_state(config_path, None)?;
-    let stdin = tokio::io::stdin();
-    let stdout = tokio::io::stdout();
-    let mut reader = BufReader::new(stdin).lines();
-    let mut writer = tokio::io::BufWriter::new(stdout);
-    while let Some(line) = reader.next_line().await? {
+    let lines = spawn_stdio_line_reader(tokio::io::stdin());
+    let writer = tokio::io::BufWriter::new(tokio::io::stdout());
+    run_stdio_loop(state, lines, writer).await
+}
+
+async fn run_stdio_loop<W: AsyncWrite + Unpin>(
+    state: AppState,
+    mut lines: tokio::sync::mpsc::UnboundedReceiver<String>,
+    mut writer: W,
+) -> Result<()> {
+    let mut queued: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+    let mut stdin_open = true;
+    loop {
+        let line = match queued.pop_front() {
+            Some(line) => line,
+            None => match lines.recv().await {
+                Some(line) => line,
+                None => break,
+            },
+        };
         if line.trim().is_empty() {
             continue;
         }
@@ -312,33 +442,94 @@ pub async fn run_stdio(config_path: Option<PathBuf>) -> Result<()> {
             continue;
         }
 
-        let response = match dispatch_stdio_request_with_writer(
-            &state,
-            &mut writer,
-            &request.method,
-            request.params,
-        )
-        .await
-        {
-            Ok(dispatch) => {
-                let encoded = jsonrpc_result(request.id, dispatch.result);
-                writer.write_all(&serde_json::to_vec(&encoded)?).await?;
-                writer.write_all(b"\n").await?;
-                writer.flush().await?;
-                if dispatch.should_exit {
-                    break;
+        // Dispatch, but keep draining stdin so a cancel or shutdown sent
+        // while a turn is streaming is acted on instead of sitting unread
+        // behind the in-flight request.
+        let mut deferred: Vec<Value> = Vec::new();
+        let mut shutdown_id: Option<Option<Value>> = None;
+        let dispatched = {
+            let mut dispatch = Box::pin(dispatch_stdio_request_with_writer(
+                &state,
+                &mut writer,
+                &request.method,
+                request.params,
+            ));
+            loop {
+                tokio::select! {
+                    biased;
+                    result = &mut dispatch => break Some(result),
+                    incoming = lines.recv(), if stdin_open => {
+                        let Some(incoming) = incoming else {
+                            stdin_open = false;
+                            continue;
+                        };
+                        match classify_stdio_control(&incoming) {
+                            StdioControl::Cancel(id) => {
+                                let result = cancel_active_stdio_turn(&state).await;
+                                deferred.push(jsonrpc_result(id, result));
+                            }
+                            StdioControl::Shutdown(id) => {
+                                let _ = cancel_active_stdio_turn(&state).await;
+                                shutdown_id = Some(id);
+                                // Bounded: an unresponsive turn must not
+                                // wedge shutdown forever.
+                                break tokio::time::timeout(
+                                    STDIO_SHUTDOWN_GRACE,
+                                    &mut dispatch,
+                                )
+                                .await
+                                .ok();
+                            }
+                            StdioControl::Other => queued.push_back(incoming),
+                        }
+                    }
                 }
-                continue;
             }
-            Err(err) => jsonrpc_error(request.id, err),
         };
 
-        writer.write_all(&serde_json::to_vec(&response)?).await?;
-        writer.write_all(b"\n").await?;
-        writer.flush().await?;
+        let mut should_exit = false;
+        let response = match dispatched {
+            Some(Ok(dispatch)) => {
+                should_exit = dispatch.should_exit;
+                jsonrpc_result(request.id, dispatch.result)
+            }
+            Some(Err(err)) => jsonrpc_error(request.id, err),
+            None => jsonrpc_error(
+                request.id,
+                JsonRpcError::internal("turn interrupted by shutdown"),
+            ),
+        };
+        write_stdio_line(&mut writer, &response).await?;
+        for response in deferred {
+            write_stdio_line(&mut writer, &response).await?;
+        }
+
+        if let Some(id) = shutdown_id {
+            let result = perform_stdio_shutdown(&state).await;
+            write_stdio_line(&mut writer, &jsonrpc_result(id, result)).await?;
+            break;
+        }
+        if should_exit {
+            break;
+        }
     }
 
     Ok(())
+}
+
+async fn write_stdio_line<W: AsyncWrite + Unpin>(writer: &mut W, value: &Value) -> Result<()> {
+    writer.write_all(&serde_json::to_vec(value)?).await?;
+    writer.write_all(b"\n").await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+/// Tear down the cached runtime bridge for a `shutdown` request.
+async fn perform_stdio_shutdown(state: &AppState) -> Value {
+    if let Some(bridge) = state.stdio_bridge.lock().await.take() {
+        bridge.lock().await.shutdown_child();
+    }
+    json!({"ok": true, "status": "stopped"})
 }
 
 async fn healthz() -> Json<Value> {
@@ -516,6 +707,7 @@ fn build_state(config_path: Option<PathBuf>, auth_token: Option<String>) -> Resu
         stdio_bridge: Arc::new(Mutex::new(None)),
         stdio_thread_hints: Arc::new(Mutex::new(HashMap::new())),
         pending_user_input: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        stdio_active_turn: Arc::new(Mutex::new(None)),
     })
 }
 
@@ -741,7 +933,12 @@ async fn handle_stdio_thread_message<W: AsyncWrite + Unpin>(
         .await
         .map_err(|err| JsonRpcError::internal(err.to_string()))?;
     let mut result = bridge
-        .message_thread(&runtime_thread_id, &parsed.input, writer)
+        .message_thread(
+            &runtime_thread_id,
+            &parsed.input,
+            writer,
+            &state.stdio_active_turn,
+        )
         .await
         .map_err(|err| JsonRpcError::internal(err.to_string()))?;
     if let Some(object) = result.as_object_mut() {
@@ -938,6 +1135,7 @@ impl RuntimeBridge {
         thread_id: &str,
         input: &str,
         writer: &mut W,
+        active_turn: &ActiveTurnSlot,
     ) -> Result<Value> {
         let turn = self
             .request_json(
@@ -954,6 +1152,19 @@ impl RuntimeBridge {
             .ok_or_else(|| anyhow!("runtime API turn response missing turn.id"))?
             .to_string();
         let response_id = format!("{thread_id}:{turn_id}");
+
+        // Publish the turn handle before streaming so `thread/cancel` and
+        // `shutdown` can interrupt it without the bridge lock we hold.
+        *active_turn.lock().await = Some(ActiveTurn {
+            client: self.client.clone(),
+            base_url: self.base_url.clone(),
+            auth_token: self.auth_token.clone(),
+            thread_id: thread_id.to_string(),
+            turn_id: turn_id.clone(),
+        });
+        let _active_turn_guard = ActiveTurnGuard {
+            slot: active_turn.clone(),
+        };
 
         emit_stdio_event(
             writer,
@@ -1103,6 +1314,18 @@ impl RuntimeBridge {
             last_seq_by_thread: HashMap::new(),
         }
     }
+
+    /// Same as [`Self::from_base_url_for_test`] but without a client
+    /// timeout, so cancellation tests exercise the cancel path rather than
+    /// a request that eventually times out on its own.
+    #[cfg(test)]
+    fn from_base_url_for_test_untimed(base_url: String) -> Self {
+        let mut bridge = Self::from_base_url_for_test(base_url);
+        bridge.client = codewhale_release::platform_http_client_builder()
+            .build()
+            .expect("build reqwest test client");
+        bridge
+    }
 }
 
 impl RuntimeBridge {
@@ -1248,6 +1471,7 @@ async fn dispatch_stdio_request_with_writer<W: AsyncWrite + Unpin>(
                     "thread/archive",
                     "thread/unarchive",
                     "thread/message",
+                    "thread/cancel",
                     "app/capabilities",
                     "app/request",
                     "app/config/get",
@@ -1281,7 +1505,8 @@ async fn dispatch_stdio_request_with_writer<W: AsyncWrite + Unpin>(
                     "thread/goal/clear",
                     "thread/archive",
                     "thread/unarchive",
-                    "thread/message"
+                    "thread/message",
+                    "thread/cancel"
                 ]
             }),
             should_exit: false,
@@ -1466,6 +1691,10 @@ async fn dispatch_stdio_request_with_writer<W: AsyncWrite + Unpin>(
                 should_exit: false,
             }
         }
+        "thread/cancel" | "thread/interrupt" => StdioDispatchResult {
+            result: cancel_active_stdio_turn(state).await,
+            should_exit: false,
+        },
         "app/capabilities" => dispatch_stdio_app_request(state, AppRequest::Capabilities).await?,
         "app/request" => {
             let request: AppRequest = parse_params(params)?;
@@ -1511,15 +1740,10 @@ async fn dispatch_stdio_request_with_writer<W: AsyncWrite + Unpin>(
                 should_exit: false,
             }
         }
-        "shutdown" => {
-            if let Some(bridge) = state.stdio_bridge.lock().await.take() {
-                bridge.lock().await.shutdown_child();
-            }
-            StdioDispatchResult {
-                result: json!({"ok": true, "status": "stopped"}),
-                should_exit: true,
-            }
-        }
+        "shutdown" => StdioDispatchResult {
+            result: perform_stdio_shutdown(state).await,
+            should_exit: true,
+        },
         _ => return Err(JsonRpcError::method_not_found(method)),
     };
     Ok(outcome)
@@ -2422,7 +2646,12 @@ mod tests {
         let (mut reader, mut writer) = tokio::io::duplex(4096);
 
         let result = bridge
-            .message_thread("thr_test", "hello", &mut writer)
+            .message_thread(
+                "thr_test",
+                "hello",
+                &mut writer,
+                &Arc::new(Mutex::new(None)),
+            )
             .await
             .expect("message_thread should succeed");
         drop(writer);
@@ -2536,6 +2765,7 @@ mod tests {
         "thread/archive",
         "thread/unarchive",
         "thread/message",
+        "thread/cancel",
         "app/capabilities",
         "app/request",
         "app/config/get",
@@ -2820,5 +3050,207 @@ mod tests {
         assert!(DEFAULT_CORS_ORIGINS.contains(&"http://localhost:3000"));
         assert!(DEFAULT_CORS_ORIGINS.contains(&"http://localhost:5173"));
         assert!(DEFAULT_CORS_ORIGINS.contains(&"tauri://localhost"));
+    }
+}
+
+#[cfg(test)]
+mod stdio_cancel_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    async fn respond_json(socket: &mut TcpStream, body: &str) {
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = socket.write_all(head.as_bytes()).await;
+        let _ = socket.write_all(body.as_bytes()).await;
+        let _ = socket.flush().await;
+    }
+
+    /// Minimal hand-rolled runtime API whose event stream never terminates
+    /// on its own: the only way out is an interrupt (when
+    /// `end_turn_on_interrupt`) or dropping the request.
+    async fn spawn_hanging_runtime(end_turn_on_interrupt: bool) -> (String, Arc<AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake runtime");
+        let addr = listener.local_addr().expect("addr");
+        let interrupts = Arc::new(AtomicUsize::new(0));
+        let (interrupt_tx, interrupt_rx) = tokio::sync::watch::channel(false);
+        let interrupts_bg = interrupts.clone();
+        tokio::spawn(async move {
+            let interrupt_tx = Arc::new(interrupt_tx);
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let interrupts = interrupts_bg.clone();
+                let interrupt_tx = interrupt_tx.clone();
+                let mut interrupt_rx = interrupt_rx.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 2048];
+                    let (method, path) = loop {
+                        let read = match socket.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => n,
+                        };
+                        buf.extend_from_slice(&chunk[..read]);
+                        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let head = String::from_utf8_lossy(&buf[..pos]).to_string();
+                            let mut parts =
+                                head.lines().next().unwrap_or_default().split_whitespace();
+                            let method = parts.next().unwrap_or_default().to_string();
+                            let path = parts.next().unwrap_or_default().to_string();
+                            break (method, path);
+                        }
+                    };
+
+                    if path.ends_with("/interrupt") {
+                        interrupts.fetch_add(1, Ordering::SeqCst);
+                        let _ = interrupt_tx.send(true);
+                        respond_json(&mut socket, "{\"ok\":true}").await;
+                    } else if path.contains("/events") {
+                        let _ = socket
+                            .write_all(
+                                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+                            )
+                            .await;
+                        let _ = socket.flush().await;
+                        if end_turn_on_interrupt {
+                            while !*interrupt_rx.borrow() {
+                                if interrupt_rx.changed().await.is_err() {
+                                    return;
+                                }
+                            }
+                            let frame = format!(
+                                "event: turn.completed\ndata: {}\n\n",
+                                json!({
+                                    "seq": 1,
+                                    "turn_id": "turn_hang",
+                                    "payload": {"turn": {"status": "interrupted"}}
+                                })
+                            );
+                            let _ = socket.write_all(frame.as_bytes()).await;
+                            let _ = socket.flush().await;
+                        } else {
+                            std::future::pending::<()>().await;
+                        }
+                    } else if path.ends_with("/turns") && method == "POST" {
+                        respond_json(&mut socket, "{\"turn\":{\"id\":\"turn_hang\"}}").await;
+                    } else {
+                        respond_json(&mut socket, "{\"id\":\"thr_rt\"}").await;
+                    }
+                });
+            }
+        });
+        (format!("http://{addr}"), interrupts)
+    }
+
+    async fn state_with_hanging_bridge(base_url: String) -> (AppState, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_path = tmp.path().join("config.toml");
+        std::fs::write(&config_path, "").expect("write config");
+        let state = build_state(Some(config_path), None).expect("state");
+        *state.stdio_bridge.lock().await = Some(Arc::new(Mutex::new(
+            RuntimeBridge::from_base_url_for_test_untimed(base_url),
+        )));
+        (state, tmp)
+    }
+
+    fn message_line() -> String {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "thread/message",
+            "params": {"thread_id": "t1", "input": "hi"}
+        })
+        .to_string()
+    }
+
+    fn responses(raw: &str) -> Vec<Value> {
+        raw.lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|value| value.get("jsonrpc").is_some())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn stdio_cancel_interrupts_in_flight_turn() {
+        let (base_url, interrupts) = spawn_hanging_runtime(true).await;
+        let (state, _tmp) = state_with_hanging_bridge(base_url).await;
+        let (mut client, server) = tokio::io::duplex(256 * 1024);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let loop_handle = tokio::spawn(run_stdio_loop(state, rx, server));
+
+        tx.send(message_line()).expect("send message");
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        tx.send(json!({"jsonrpc": "2.0", "id": 2, "method": "thread/cancel"}).to_string())
+            .expect("send cancel");
+        drop(tx);
+
+        let mut raw = String::new();
+        tokio::time::timeout(Duration::from_secs(4), client.read_to_string(&mut raw))
+            .await
+            .expect("stdio loop must answer the cancel while the turn streams")
+            .expect("read stdio output");
+        let _ = tokio::time::timeout(Duration::from_secs(4), loop_handle).await;
+
+        assert_eq!(
+            interrupts.load(Ordering::SeqCst),
+            1,
+            "cancel must interrupt the runtime turn"
+        );
+        let responses = responses(&raw);
+        let cancel = responses
+            .iter()
+            .find(|value| value["id"] == 2)
+            .expect("cancel response");
+        assert_eq!(cancel["result"]["canceled"], true);
+        let turn = responses
+            .iter()
+            .find(|value| value["id"] == 1)
+            .expect("turn response");
+        assert!(
+            turn["error"].is_object(),
+            "interrupted turn should report an error, got {turn}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stdio_shutdown_does_not_block_on_a_wedged_turn() {
+        // The runtime ignores the interrupt entirely: shutdown must still
+        // return within a bounded time instead of hanging forever.
+        let (base_url, interrupts) = spawn_hanging_runtime(false).await;
+        let (state, _tmp) = state_with_hanging_bridge(base_url).await;
+        let (mut client, server) = tokio::io::duplex(256 * 1024);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let loop_handle = tokio::spawn(run_stdio_loop(state, rx, server));
+
+        tx.send(message_line()).expect("send message");
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        tx.send(json!({"jsonrpc": "2.0", "id": 9, "method": "shutdown"}).to_string())
+            .expect("send shutdown");
+
+        let mut raw = String::new();
+        tokio::time::timeout(Duration::from_secs(8), client.read_to_string(&mut raw))
+            .await
+            .expect("shutdown must not block behind an in-flight turn")
+            .expect("read stdio output");
+        let _ = tokio::time::timeout(Duration::from_secs(4), loop_handle).await;
+
+        assert!(
+            interrupts.load(Ordering::SeqCst) >= 1,
+            "shutdown should try to interrupt the in-flight turn first"
+        );
+        let responses = responses(&raw);
+        let shutdown = responses
+            .iter()
+            .find(|value| value["id"] == 9)
+            .expect("shutdown response");
+        assert_eq!(shutdown["result"]["status"], "stopped");
     }
 }

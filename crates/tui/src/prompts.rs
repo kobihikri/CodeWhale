@@ -3697,22 +3697,32 @@ start it",
 
     #[test]
     fn operate_mode_prompt_keeps_multitask_simple_and_async() {
+        // 0.9.2 (#4780/#4781): Operate's nine numbered "must" doctrine clauses
+        // were compressed 621 -> ~256 tokens. What is asserted here is the
+        // residue that mechanism CANNOT carry — strategy defaults the runtime
+        // cannot enforce, and the authority guarantee. The deleted clauses
+        // taught method (when to prefer best-of-n, how to phrase receipts);
+        // that belongs in tool error text at the point of failure, not in a
+        // block re-sent on every turn of every Operate session.
+        // Compare on whitespace-normalized text: these assertions are about
+        // which clauses survive, not where the paragraph happens to wrap. The
+        // literal `contains` form silently turned a reflow into a failure.
+        let operate_unwrapped = OPERATE_MODE
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         for phrase in [
             "ordinary messages",
             "small or tightly coupled tasks directly",
             "Dispatching background workers is the default",
             "queued user message as a new task",
             "approval, sandbox, and repository policies",
-            "lifecycle claims stay exact",
             "internal control-plane mechanics",
-            "Goal first",
             "Dispatch is not completion",
-            "verification evidence",
-            "best-of-n",
-            "parent stays free",
+            "parent turn",
         ] {
             assert!(
-                OPERATE_MODE.contains(phrase),
+                operate_unwrapped.contains(phrase),
                 "OPERATE_MODE missing multitask phrase {phrase:?}"
             );
         }

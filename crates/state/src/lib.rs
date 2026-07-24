@@ -1696,14 +1696,37 @@ impl StateStore {
             })?;
         let reader = BufReader::new(file);
         let mut latest = HashMap::<String, SessionIndexEntry>::new();
+        // A torn or corrupted line must not poison the whole index: `append_thread_name`
+        // is a plain unsynced append, so a crash mid-write can leave a truncated final
+        // line. Every thread-name lookup funnels through here, and so does compaction --
+        // failing hard on one bad line would break all lookups *and* prevent the index
+        // from ever repairing itself. Skip the damaged line and keep the good ones;
+        // the next compaction then drops it for good.
         for line in reader.lines() {
-            let line = line.context("failed to read session index line")?;
+            let line = match line {
+                Ok(line) => line,
+                Err(error) => {
+                    tracing::warn!(
+                        "skipping unreadable session index line in {}: {error}",
+                        self.session_index_path.display()
+                    );
+                    continue;
+                }
+            };
             if line.trim().is_empty() {
                 continue;
             }
-            let parsed: SessionIndexEntry =
-                serde_json::from_str(&line).context("failed to parse session index entry")?;
-            latest.insert(parsed.thread_id.clone(), parsed);
+            match serde_json::from_str::<SessionIndexEntry>(&line) {
+                Ok(parsed) => {
+                    latest.insert(parsed.thread_id.clone(), parsed);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        "skipping unparseable session index entry in {}: {error}",
+                        self.session_index_path.display()
+                    );
+                }
+            }
         }
         Ok(latest)
     }
@@ -2436,5 +2459,48 @@ mod tests {
             .find_thread_name_by_id("thread-1")
             .expect("lookup thread name");
         assert_eq!(name.as_deref(), Some("name-5"));
+    }
+
+    /// Regression: #4735 -- one torn/garbage line in session_index.jsonl used to abort
+    /// the whole read via `?`, breaking every thread-name lookup AND compaction (which
+    /// reads through the same path), so the index could never repair itself.
+    #[test]
+    fn session_index_map_skips_corrupted_lines() {
+        let store = temp_state_store("session-index-corrupt-line");
+        store
+            .append_thread_name("thread-good-1", Some("alpha".to_string()), 1, None)
+            .expect("append first entry");
+        store
+            .append_thread_name("thread-good-2", Some("beta".to_string()), 2, None)
+            .expect("append second entry");
+
+        // Splice a torn line (a truncated JSON object, exactly what an unsynced
+        // append leaves behind after a crash) between the two valid entries.
+        let raw = fs::read_to_string(&store.session_index_path).expect("read index");
+        let mut lines: Vec<&str> = raw.lines().collect();
+        lines.insert(1, r#"{"thread_id":"thread-tor"#);
+        fs::write(&store.session_index_path, format!("{}\n", lines.join("\n")))
+            .expect("write corrupted index");
+
+        let map = store
+            .session_index_map()
+            .expect("corrupted line must not abort read");
+        assert_eq!(
+            map.get("thread-good-1").and_then(|e| e.thread_name.clone()),
+            Some("alpha".to_string())
+        );
+        assert_eq!(
+            map.get("thread-good-2").and_then(|e| e.thread_name.clone()),
+            Some("beta".to_string())
+        );
+
+        // And the public lookups built on it stay alive.
+        assert_eq!(
+            store
+                .find_thread_name_by_id("thread-good-2")
+                .expect("lookup must survive a corrupted line")
+                .as_deref(),
+            Some("beta")
+        );
     }
 }

@@ -532,15 +532,32 @@ fn base_source_entries(model: &str, workspace: &Path, skills_dir: Option<&Path>)
         CountingConfidence::Approximate,
         Some(3),
     ));
-    builder.push(SourceEntry::text(
-        SourceKind::CompactionRelayTemplate,
-        "Compaction relay template",
-        Some("crates/tui/src/prompts/text.rs (COMPACT_TEMPLATE)".to_string()),
-        ActivationReason::AlwaysOn,
-        COMPACT_TEMPLATE,
-        CountingConfidence::High,
-        Some(3),
-    ));
+    // #4781 item 3: the relay template is no longer always-on. It travels
+    // with the handoff fragment, so it costs nothing on sessions that have
+    // no relay to read.
+    let handoff_present = workspace
+        .join(crate::prompts::HANDOFF_RELATIVE_PATH)
+        .exists()
+        || workspace.join(".deepseek/handoff.md").exists();
+    if handoff_present {
+        builder.push(SourceEntry::text(
+            SourceKind::CompactionRelayTemplate,
+            "Compaction relay template",
+            Some("crates/tui/src/prompts/text.rs (COMPACT_TEMPLATE)".to_string()),
+            ActivationReason::FilePresent,
+            COMPACT_TEMPLATE,
+            CountingConfidence::High,
+            Some(6),
+        ));
+    } else {
+        builder.push(SourceEntry::omitted(
+            SourceKind::CompactionRelayTemplate,
+            "Compaction relay template",
+            Some("crates/tui/src/prompts/text.rs (COMPACT_TEMPLATE)".to_string()),
+            Some(6),
+            "no relay artifact, so the format description is not sent",
+        ));
+    }
     builder.push(SourceEntry::estimate(
         SourceKind::RuntimePolicy,
         "Runtime policy reference",

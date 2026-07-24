@@ -53,6 +53,15 @@ pub struct PromptSessionContext<'a> {
     /// Immutable plugin snapshot owned by this App/Engine workspace context.
     /// Never sourced from process-global mutable state.
     pub plugin_registry: Option<&'a crate::plugins::PluginRegistry>,
+    /// Active session mode (`"agent"` / `"plan"` / `"operate"`). When set, the
+    /// matching mode doctrine is composed **once** into the cache-stable
+    /// prefix instead of being re-sent per turn inside `<turn_meta>` (#4780).
+    /// `None` keeps the legacy prefix byte-for-byte.
+    pub active_mode: Option<&'a str>,
+    /// Active approval posture (`"suggest"` / `"auto"` / `"bypass"` /
+    /// `"never"`). Same contract as `active_mode`: doctrine once, in the
+    /// prefix; `<turn_meta>` states the posture as a fact.
+    pub approval_posture: Option<&'a str>,
 }
 
 impl Default for PromptSessionContext<'_> {
@@ -69,6 +78,8 @@ impl Default for PromptSessionContext<'_> {
             verbosity: None,
             skills_scan_codewhale_only: false,
             plugin_registry: None,
+            active_mode: None,
+            approval_posture: None,
         }
     }
 }
@@ -395,7 +406,8 @@ fn user_constitution_disabled_by_setup_state() -> bool {
 pub use text::{
     AGENT_MODE, BASE_PROMPT, COMPACT_TEMPLATE, CORE_EXECUTION_PROFILE_PROMPT,
     GOAL_CONTINUATION_PROMPT, LANGUAGE_PROMPT, MEMORY_GUIDANCE, OPERATE_MODE, OUTPUT_PROMPT,
-    PLAN_MODE,
+    PLAN_MODE, QUESTION_DISCIPLINE_AUTO, QUESTION_DISCIPLINE_BYPASS, QUESTION_DISCIPLINE_NEVER,
+    QUESTION_DISCIPLINE_SUGGEST,
 };
 
 // ── Embedder prompt overrides ──
@@ -413,7 +425,6 @@ static LOCALE_CLOSER_ZH_HANS_OVERRIDE: std::sync::OnceLock<String> = std::sync::
 static LOCALE_CLOSER_JA_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 static LOCALE_CLOSER_PT_BR_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 static LOCALE_CLOSER_VI_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-static AUTHORITY_RECAP_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 static STATIC_PROMPT_COMPOSER: std::sync::OnceLock<Box<StaticPromptComposer>> =
     std::sync::OnceLock::new();
 static PROMPT_OVERRIDE_NOTICES: LazyLock<Mutex<Vec<String>>> =
@@ -483,11 +494,6 @@ pub fn set_locale_closer_pt_br_override(s: String) -> Result<(), String> {
 /// Replace the Vietnamese locale closer.
 pub fn set_locale_closer_vi_override(s: String) -> Result<(), String> {
     set_prompt_override(&LOCALE_CLOSER_VI_OVERRIDE, s)
-}
-
-/// Replace the trailing `## Authority Recap` block.
-pub fn set_authority_recap_override(s: String) -> Result<(), String> {
-    set_prompt_override(&AUTHORITY_RECAP_OVERRIDE, s)
 }
 
 /// Replace the byte-stable base/personality prompt segment for subsequent
@@ -684,10 +690,6 @@ fn effective_locale_closer_pt_br() -> &'static str {
 
 fn effective_locale_closer_vi() -> &'static str {
     effective_prompt_override(&LOCALE_CLOSER_VI_OVERRIDE, LOCALE_CLOSER_VI)
-}
-
-fn effective_authority_recap() -> &'static str {
-    effective_prompt_override(&AUTHORITY_RECAP_OVERRIDE, AUTHORITY_RECAP)
 }
 
 /// Optional locale-native reinforcement preamble prepended to the system
@@ -954,20 +956,35 @@ fn render_core_tool_group(group: &[&str], core_tools: &[&str]) -> Option<String>
     (!rendered.is_empty()).then_some(rendered)
 }
 
-/// Authority recap block — appended at the end of the system prompt,
-/// just before the user's first message. Uses recency bias constructively:
-/// this is the last thing the model reads before generating, so it
-/// reinforces the Constitutional hierarchy without occupying cache-stable
-/// prefix space.
-const AUTHORITY_RECAP: &str = "\
-## Authority Recap
+/// Mode doctrine for the active session mode, composed once into the
+/// cache-stable prefix (#4780). `None` when the caller does not know the
+/// mode, which keeps every legacy entry point byte-identical.
+fn mode_doctrine_block(active_mode: Option<&str>) -> Option<&'static str> {
+    match active_mode?.trim().to_ascii_lowercase().as_str() {
+        "agent" | "act" | "auto" | "yolo" => Some(AGENT_MODE),
+        "plan" => Some(PLAN_MODE),
+        "operate" => Some(OPERATE_MODE),
+        _ => None,
+    }
+}
 
-Codewhale's constitution governs your behavior. Ground truth underlies the
-whole list: the user may override a fact, but no one may invent one. When
-guidance conflicts, the user's request this turn outranks this constitution,
-which outranks nearest-scope project law and instructions, which outrank
-standing user-global preferences, which outrank memory and previous-session
-handoffs. When in doubt, consult ### Article II — Whose word wins.";
+/// Question-discipline paragraph for the active approval posture. Text lives
+/// in `text.rs` (the single prompt authority, #4779); this selects it.
+#[must_use]
+pub fn question_discipline_text(approval_posture: &str) -> Option<&'static str> {
+    match approval_posture.trim().to_ascii_lowercase().as_str() {
+        "suggest" | "ask" => Some(text::QUESTION_DISCIPLINE_SUGGEST),
+        "auto" | "auto-review" | "auto_review" => Some(text::QUESTION_DISCIPLINE_AUTO),
+        "bypass" | "full" | "full-access" | "full_access" => Some(text::QUESTION_DISCIPLINE_BYPASS),
+        "never" | "read-only" | "read_only" | "plan" => Some(text::QUESTION_DISCIPLINE_NEVER),
+        _ => None,
+    }
+}
+
+fn question_discipline_block(approval_posture: Option<&str>) -> Option<String> {
+    let body = question_discipline_text(approval_posture?)?;
+    Some(format!("## Question Discipline\n\n{body}"))
+}
 
 pub fn compose_prompt() -> String {
     compose_prompt_with_approval_model_and_shell("codewhale")
@@ -1070,6 +1087,8 @@ pub fn system_prompt_for_mode_with_context_and_skills(
             verbosity: None,
             skills_scan_codewhale_only: false,
             plugin_registry: None,
+            active_mode: None,
+            approval_posture: None,
         },
     )
 }
@@ -1207,10 +1226,40 @@ pub fn system_prompt_for_mode_with_context_skills_session_and_approval(
     full_prompt.push_str("\n\n");
     full_prompt.push_str(CORE_EXECUTION_PROFILE_PROMPT.trim());
 
-    // 5. Compaction relay template — so the model knows the format to use
-    //    when writing `.codewhale/handoff.md` on exit / `/compact`.
-    full_prompt.push_str("\n\n");
-    full_prompt.push_str(COMPACT_TEMPLATE);
+    // 5. Mode doctrine + approval question discipline (#4780). Doctrine
+    //    belongs in the prefix, selected once per session; `<turn_meta>`
+    //    should carry only the active mode and posture as *facts*. Repeating
+    //    the full doctrine per turn makes a model perform compliance rather
+    //    than think, and out-shouts the constitution by salience.
+    //
+    //    STAGE 2 seam. Both fields default to `None`, so today this composes
+    //    nothing and the prefix stays byte-identical for every shipped caller.
+    //    Stage 2 must, in one change: (a) populate `active_mode` /
+    //    `approval_posture` from `Engine::current_mode` and
+    //    `session.approval_mode`; (b) make `Engine::refresh_system_prompt`
+    //    rebuild on mode/posture change — its doc comment currently says
+    //    "based on current non-mode context", so today a mode switch would
+    //    leave a stale prefix; and (c) delete the doctrine lines from
+    //    `turn_metadata_block` (`Current mode policy:` and
+    //    `Current question discipline:`) together with
+    //    `Engine::mode_runtime_instructions` and
+    //    `Engine::permission_question_discipline`. Populating these fields
+    //    without (b) and (c) would double-ship the doctrine and go stale on
+    //    `/mode`, which is worse than the status quo.
+    if let Some(mode_doctrine) = mode_doctrine_block(session_context.active_mode) {
+        full_prompt.push_str("\n\n");
+        full_prompt.push_str(mode_doctrine.trim());
+    }
+    if let Some(discipline) = question_discipline_block(session_context.approval_posture) {
+        full_prompt.push_str("\n\n");
+        full_prompt.push_str(&discipline);
+    }
+
+    // NOTE: the compaction relay template (`COMPACT_TEMPLATE`) used to be
+    // pushed here unconditionally — 314 tokens of handoff *reader* guidance on
+    // every session, including the overwhelming majority that never compact
+    // (#4781 item 3). It now travels with the handoff fragment below, so it
+    // arrives exactly when there is a relay to read.
 
     // ── Volatile-content boundary → WorldState fragments ──────────────────
     // Constitution (`full_prompt`) stays the cache-stable Blocks[0] prefix.
@@ -1244,8 +1293,11 @@ pub fn system_prompt_for_mode_with_context_skills_session_and_approval(
     // Route fragment: active model / verbosity / translation posture.
     let route_body = render_route_fragment(&session_context);
 
-    // Token-budget / continuity fragment: prior-session handoff relay.
-    let token_budget_body = load_handoff_block(workspace);
+    // Token-budget / continuity fragment: prior-session handoff relay. The
+    // compaction relay template rides along with it (#4781 item 3) so the
+    // format description costs nothing on sessions that have no handoff.
+    let token_budget_body = load_handoff_block(workspace)
+        .map(|handoff| format!("{}\n\n{handoff}", COMPACT_TEMPLATE.trim()));
 
     let world_state = world_state_from_session_facts(
         Some(workspace_body.as_str()),
@@ -1262,12 +1314,14 @@ pub fn system_prompt_for_mode_with_context_skills_session_and_approval(
     }
     .to_system_blocks();
 
-    // Trailers keep recency bias after WorldState: authority, then locale.
-    blocks.push(SystemBlock {
-        block_type: "text".to_string(),
-        text: effective_authority_recap().trim().to_string(),
-        cache_control: None,
-    });
+    // Trailer keeps recency bias after WorldState: locale reinforcement only.
+    //
+    // `## Authority Recap` used to sit here, restating the whole precedence
+    // ordering in prose. It was deleted in 0.9.2 (#4777): Article II says the
+    // ordering is "stated here and nowhere else", and a second statement of it
+    // at prompt end is exactly the drift the Article forbids — it had already
+    // rotted into pointing at a heading (`### Whose word wins`) that no longer
+    // exists. `only_the_constitution_states_precedence` now guards this.
     if let Some(closer) = session_context
         .show_thinking
         .then(|| locale_reinforcement_closer(session_context.locale_tag))
@@ -1526,8 +1580,7 @@ mod tests {
     #[test]
     fn static_prompt_composer_unset_keeps_default_layers_byte_identical() {
         let default_layers = compose_default_static_layers("deepseek-v4-flash");
-        let composed =
-            apply_static_prompt_composer(None, "deepseek-v4-flash", &default_layers);
+        let composed = apply_static_prompt_composer(None, "deepseek-v4-flash", &default_layers);
 
         assert_byte_identical("unset static prompt composer", &default_layers, &composed);
     }
@@ -1594,6 +1647,316 @@ start it",
                 && !BASE_PROMPT.contains("Tool-use enforcement"),
             "0.9.0 base constitution should not carry the old execution-discipline tail"
         );
+    }
+
+    // ── Constitutional integrity guards (#4777, #4778, #4779) ──────────
+    //
+    // These three tests exist because the 0.9.1 prompt layer failed in three
+    // specific ways at once: a second precedence ordering that had silently
+    // inverted, overlays citing a numbered constitution that no longer
+    // existed, and constants nobody noticed were unreachable. Each test
+    // guards one of those failure modes structurally, so the next drift is a
+    // red build rather than a shipped contradiction.
+
+    /// Every prompt layer that can reach a model, composed the way the
+    /// runtime composes it. Deliberately built from the *composition path*
+    /// rather than from `text.rs` source, because several precedence
+    /// restatements lived outside `text.rs` entirely.
+    fn composed_layers_for_audit() -> Vec<(&'static str, String)> {
+        let mut layers: Vec<(&'static str, String)> = vec![
+            ("LANGUAGE_PROMPT", LANGUAGE_PROMPT.to_string()),
+            ("OUTPUT_PROMPT", OUTPUT_PROMPT.to_string()),
+            ("AGENT_MODE", AGENT_MODE.to_string()),
+            ("PLAN_MODE", PLAN_MODE.to_string()),
+            ("OPERATE_MODE", OPERATE_MODE.to_string()),
+            ("COMPACT_TEMPLATE", COMPACT_TEMPLATE.to_string()),
+            (
+                "GOAL_CONTINUATION_PROMPT",
+                GOAL_CONTINUATION_PROMPT.to_string(),
+            ),
+            ("MEMORY_GUIDANCE", MEMORY_GUIDANCE.to_string()),
+            (
+                "CORE_EXECUTION_PROFILE_PROMPT",
+                CORE_EXECUTION_PROFILE_PROMPT.to_string(),
+            ),
+            (
+                "SUBAGENT_OUTPUT_FORMAT",
+                text::SUBAGENT_OUTPUT_FORMAT.to_string(),
+            ),
+            (
+                "QUESTION_DISCIPLINE_SUGGEST",
+                QUESTION_DISCIPLINE_SUGGEST.to_string(),
+            ),
+            (
+                "QUESTION_DISCIPLINE_AUTO",
+                QUESTION_DISCIPLINE_AUTO.to_string(),
+            ),
+            (
+                "QUESTION_DISCIPLINE_BYPASS",
+                QUESTION_DISCIPLINE_BYPASS.to_string(),
+            ),
+            (
+                "QUESTION_DISCIPLINE_NEVER",
+                QUESTION_DISCIPLINE_NEVER.to_string(),
+            ),
+            (
+                "concise_output_discipline_instruction",
+                concise_output_discipline_instruction().to_string(),
+            ),
+            (
+                "hidden_thinking_language_instruction",
+                hidden_thinking_language_instruction("en"),
+            ),
+            (
+                "translation_output_instruction",
+                translation_output_instruction("zh-Hans"),
+            ),
+        ];
+        for tag in ["zh-Hans", "ja", "pt-BR", "vi"] {
+            if let Some(preamble) = locale_reinforcement_preamble(tag) {
+                layers.push(("locale preamble", preamble.to_string()));
+            }
+            if let Some(closer) = locale_reinforcement_closer(tag) {
+                layers.push(("locale closer", closer.to_string()));
+            }
+        }
+        layers
+    }
+
+    /// #4777. Article II says the ordering is "stated here and nowhere else".
+    /// This makes that literally true: no composed layer except `BASE_PROMPT`
+    /// may restate precedence, in rank vocabulary or in prose.
+    #[test]
+    fn only_the_constitution_states_precedence() {
+        // Vocabulary that can only be used to claim or restate a rank.
+        const RANK_VOCABULARY: &[&str] = &[
+            "Tier",
+            "Statute",
+            "Regulation",
+            "Local Law",
+            "local law",
+            "Constitutional hierarchy",
+            "outranks",
+            "outrank ",
+            "takes precedence",
+            "supersedes this",
+            "subordinate to the Constitution",
+            "Whose word wins",
+        ];
+
+        for (name, body) in composed_layers_for_audit() {
+            for term in RANK_VOCABULARY {
+                assert!(
+                    !body.contains(term),
+                    "layer {name} restates precedence ({term:?}); Article II says the \
+                     ordering is stated in BASE_PROMPT and nowhere else"
+                );
+            }
+        }
+
+        // ...and the constitution must actually carry the claim it is making.
+        let unwrapped = BASE_PROMPT.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            unwrapped.contains(
+                "This ordering is stated here and nowhere else. Every other layer describes \
+                 what it does, not where it ranks"
+            ),
+            "Article II must carry the 'stated here and nowhere else' clause"
+        );
+    }
+
+    /// #4778. Overlays may state behavior; they may never cite a numbered
+    /// structure. Any `Article` / `Statute` / `Tier` token appearing outside
+    /// `BASE_PROMPT` must resolve to a definition inside `BASE_PROMPT` —
+    /// which, for `Statute` and `Tier`, means it must not appear at all,
+    /// because `BASE_PROMPT` defines neither.
+    #[test]
+    fn no_orphaned_citations() {
+        let defined: Vec<&str> = [
+            "Article I",
+            "Article II",
+            "Article III",
+            "Article IV",
+            "Article V",
+        ]
+        .into_iter()
+        .filter(|article| BASE_PROMPT.contains(&format!("### {article} —")))
+        .collect();
+        assert_eq!(
+            defined.len(),
+            5,
+            "BASE_PROMPT must define exactly Articles I–V; found {defined:?}"
+        );
+        assert!(
+            !BASE_PROMPT.contains("Tier") && !BASE_PROMPT.contains("Statute"),
+            "BASE_PROMPT defines no Tiers or Statutes, so no layer may cite one"
+        );
+
+        for (name, body) in composed_layers_for_audit() {
+            for token in ["Tier", "Statute", "Regulation"] {
+                assert!(
+                    !body.contains(token),
+                    "layer {name} cites {token:?}, which BASE_PROMPT does not define"
+                );
+            }
+            // `Article` is citable, but only for an Article that exists.
+            if let Some(at) = body.find("Article") {
+                let tail = &body[at..];
+                assert!(
+                    defined.iter().any(|article| tail.starts_with(article)),
+                    "layer {name} cites an Article that BASE_PROMPT does not define: {:?}",
+                    &tail[..tail.len().min(40)]
+                );
+            }
+        }
+    }
+
+    /// #4779. The test that would have caught `AGENT_PROMPT`,
+    /// `NEVER_APPROVAL`, and the rest the day they became unreachable: every
+    /// `pub const` in `text.rs` must have a live composition path, not merely
+    /// a test reference. Written as an explicit ledger so adding a constant
+    /// without wiring it is a compile error here, not silent dead prose.
+    #[test]
+    fn every_layer_is_reachable() {
+        // (constant, the live path that puts it in front of a model)
+        let ledger: &[(&str, &str, &str)] = &[
+            (
+                "BASE_PROMPT",
+                BASE_PROMPT,
+                "prefix, via compose_default_static_layers_with_context",
+            ),
+            (
+                "LANGUAGE_PROMPT",
+                LANGUAGE_PROMPT,
+                "prefix, via compose_default_static_layers_with_context",
+            ),
+            (
+                "OUTPUT_PROMPT",
+                OUTPUT_PROMPT,
+                "prefix, via compose_default_static_layers_with_context",
+            ),
+            (
+                "CORE_EXECUTION_PROFILE_PROMPT",
+                CORE_EXECUTION_PROFILE_PROMPT,
+                "prefix, pushed unconditionally",
+            ),
+            (
+                "COMPACT_TEMPLATE",
+                COMPACT_TEMPLATE,
+                "handoff WorldState fragment",
+            ),
+            (
+                "MEMORY_GUIDANCE",
+                MEMORY_GUIDANCE,
+                "workspace WorldState fragment, when memory is non-empty",
+            ),
+            (
+                "GOAL_CONTINUATION_PROMPT",
+                GOAL_CONTINUATION_PROMPT,
+                "tools/goal.rs runtime injection",
+            ),
+            (
+                "SUBAGENT_OUTPUT_FORMAT",
+                text::SUBAGENT_OUTPUT_FORMAT,
+                "tools/subagent/mod.rs brief",
+            ),
+            (
+                "AGENT_MODE",
+                AGENT_MODE,
+                "engine mode_runtime_instructions / prefix mode doctrine",
+            ),
+            (
+                "PLAN_MODE",
+                PLAN_MODE,
+                "engine mode_runtime_instructions / prefix mode doctrine",
+            ),
+            (
+                "OPERATE_MODE",
+                OPERATE_MODE,
+                "engine mode_runtime_instructions / prefix mode doctrine",
+            ),
+            (
+                "QUESTION_DISCIPLINE_SUGGEST",
+                QUESTION_DISCIPLINE_SUGGEST,
+                "engine permission_question_discipline",
+            ),
+            (
+                "QUESTION_DISCIPLINE_AUTO",
+                QUESTION_DISCIPLINE_AUTO,
+                "engine permission_question_discipline",
+            ),
+            (
+                "QUESTION_DISCIPLINE_BYPASS",
+                QUESTION_DISCIPLINE_BYPASS,
+                "engine permission_question_discipline",
+            ),
+            (
+                "QUESTION_DISCIPLINE_NEVER",
+                QUESTION_DISCIPLINE_NEVER,
+                "engine permission_question_discipline",
+            ),
+        ];
+
+        // 1. The ledger must cover every `pub const` declared in text.rs.
+        //    `include_str!` keeps this honest against the real source file.
+        let source = include_str!("prompts/text.rs");
+        let declared: Vec<&str> = source
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("pub const "))
+            .filter_map(|rest| rest.split(':').next())
+            .map(str::trim)
+            .collect();
+        assert!(
+            !declared.is_empty(),
+            "failed to parse any `pub const` out of prompts/text.rs"
+        );
+        for name in &declared {
+            assert!(
+                ledger.iter().any(|(ledger_name, _, _)| ledger_name == name),
+                "prompts/text.rs declares `{name}` but `every_layer_is_reachable` has no \
+                 composition path for it — either wire it into a live path or delete it (#4779)"
+            );
+        }
+        assert_eq!(
+            declared.len(),
+            ledger.len(),
+            "ledger and prompts/text.rs disagree on the set of bundled layers"
+        );
+
+        // 2. Every ledgered constant must be non-empty and route through the
+        //    selectors the runtime actually calls (the part a stale ledger
+        //    entry cannot fake).
+        for (name, body, path) in ledger {
+            assert!(
+                !body.trim().is_empty(),
+                "layer {name} is empty but claims path {path}"
+            );
+        }
+        for mode in ["agent", "plan", "operate"] {
+            assert!(
+                mode_doctrine_block(Some(mode)).is_some(),
+                "mode doctrine unreachable for mode {mode}"
+            );
+        }
+        for posture in ["suggest", "auto", "bypass", "never"] {
+            assert!(
+                question_discipline_text(posture).is_some(),
+                "question discipline unreachable for posture {posture}"
+            );
+        }
+
+        // 3. The four prefix layers must genuinely land in the prefix.
+        let prefix = compose_prompt();
+        for (name, needle) in [
+            ("BASE_PROMPT", "## Codewhale"),
+            ("LANGUAGE_PROMPT", "## Language"),
+            ("OUTPUT_PROMPT", "## Output Formatting"),
+        ] {
+            assert!(
+                prefix.contains(needle),
+                "layer {name} claims a prefix path but is absent from compose_prompt()"
+            );
+        }
     }
 
     #[test]
@@ -1728,8 +2091,7 @@ start it",
 
     #[test]
     fn compose_prompt_for_v4_model_stays_model_fact_free() {
-        let prompt =
-            compose_prompt_with_approval_model_and_shell("deepseek-v4-pro");
+        let prompt = compose_prompt_with_approval_model_and_shell("deepseek-v4-pro");
         assert!(prompt.contains("You are Codewhale"));
         assert!(!prompt.contains("Your V4 Characteristics"));
         assert!(!prompt.contains("one-million-token context window"));
@@ -1738,8 +2100,7 @@ start it",
 
     #[test]
     fn compose_prompt_for_kimi_stays_model_fact_free() {
-        let prompt =
-            compose_prompt_with_approval_model_and_shell("moonshotai/kimi-k2.6");
+        let prompt = compose_prompt_with_approval_model_and_shell("moonshotai/kimi-k2.6");
         assert!(prompt.contains("You are Codewhale"));
         assert!(!prompt.contains("Your V4 Characteristics"));
         assert!(!prompt.contains("one-million"));
@@ -1762,8 +2123,7 @@ start it",
 
     #[test]
     fn compose_prompt_for_unknown_model_stays_model_fact_free() {
-        let prompt =
-            compose_prompt_with_approval_model_and_shell("llama3.3:70b");
+        let prompt = compose_prompt_with_approval_model_and_shell("llama3.3:70b");
         assert!(prompt.contains("You are Codewhale"));
         assert!(!prompt.contains("Your V4 Characteristics"));
         assert!(!prompt.contains("one-million"));
@@ -1792,10 +2152,8 @@ start it",
     fn compose_prompt_is_model_agnostic_in_preamble() {
         // 0.9.0 keeps the preamble byte-for-byte the same regardless of
         // model id, and no {model_id} placeholder leaks.
-        let flash =
-            compose_prompt_with_approval_model_and_shell("deepseek-v4-flash");
-        let kimi =
-            compose_prompt_with_approval_model_and_shell("moonshotai/kimi-k2.6");
+        let flash = compose_prompt_with_approval_model_and_shell("deepseek-v4-flash");
+        let kimi = compose_prompt_with_approval_model_and_shell("moonshotai/kimi-k2.6");
         assert!(
             flash.contains("You are Codewhale"),
             "0.9.0 preamble must open with the model-agnostic Codewhale stance"
@@ -1831,8 +2189,7 @@ start it",
 
     #[test]
     fn composed_prompt_no_longer_inlines_tool_taxonomy() {
-        let prompt =
-            compose_prompt_with_approval_model_and_shell("deepseek-v4-pro");
+        let prompt = compose_prompt_with_approval_model_and_shell("deepseek-v4-pro");
         // The core tool taxonomy (grep_files / git_status / run_tests hints)
         // is no longer prepended as a standalone "## Core Tool Taxonomy" block.
         // It now lives inside the "## Runtime Policy Reference" section of the
@@ -1877,8 +2234,14 @@ start it",
         }
     }
 
+    /// #4777. The `## Authority Recap` trailer was deleted in 0.9.2: it
+    /// restated the precedence ordering a second time, which Article II
+    /// forbids, and it had already rotted into pointing at a heading
+    /// (`### Whose word wins`) that no longer exists. Nothing may bring it
+    /// back — that is what `only_the_constitution_states_precedence` and this
+    /// test protect together.
     #[test]
-    fn authority_recap_appears_in_full_prompt() {
+    fn authority_recap_is_gone_from_the_full_prompt() {
         let tmp = tempdir().expect("tempdir");
         let text = system_prompt_flat_text(
             &system_prompt_for_mode_with_context_skills_session_and_approval(
@@ -1889,17 +2252,20 @@ start it",
                 PromptSessionContext::default(),
             ),
         );
+        for stale in [
+            "## Authority Recap",
+            "Codewhale's constitution governs your behavior",
+            "consult ### Whose word wins",
+            "### Whose word wins",
+        ] {
+            assert!(
+                !text.contains(stale),
+                "the authority recap must stay deleted; found {stale:?}"
+            );
+        }
         assert!(
-            text.contains("## Authority Recap"),
-            "full system prompt must contain the authority recap"
-        );
-        assert!(
-            text.contains("Codewhale's constitution governs your behavior"),
-            "authority recap must reference the Constitution"
-        );
-        assert!(
-            text.contains("consult ### Article II — Whose word wins"),
-            "authority recap must point at 0.9.0's precedence section"
+            text.contains("### Article II — Whose word wins"),
+            "the constitution itself must still carry Article II"
         );
     }
 
@@ -1968,7 +2334,6 @@ start it",
         )
         .expect("skill file");
     }
-
 
     #[test]
     fn execution_discipline_lives_in_agent_mode_after_core_constitution() {
@@ -2079,6 +2444,8 @@ start it",
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
+                    active_mode: None,
+                    approval_posture: None,
                 },
             ),
         );
@@ -2151,6 +2518,8 @@ start it",
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
+                    active_mode: None,
+                    approval_posture: None,
                 },
             ),
         );
@@ -2196,6 +2565,8 @@ start it",
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
+                    active_mode: None,
+                    approval_posture: None,
                 },
             ),
         );
@@ -2251,6 +2622,8 @@ start it",
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
+                    active_mode: None,
+                    approval_posture: None,
                 },
             ),
         );
@@ -2351,6 +2724,8 @@ start it",
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
+                    active_mode: None,
+                    approval_posture: None,
                 },
             ));
         assert!(prompt.contains("## Environment"));
@@ -2538,6 +2913,8 @@ start it",
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
+                    active_mode: None,
+                    approval_posture: None,
                 },
             ));
         assert!(
@@ -2568,6 +2945,8 @@ start it",
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
+                    active_mode: None,
+                    approval_posture: None,
                 },
             ));
         let mem_at = prompt.find("User Memory").expect("user memory present");
@@ -2578,31 +2957,25 @@ start it",
         );
     }
 
+    /// #4777. `memory_guidance_matches_constitutional_tier_order` used to
+    /// live here, asserting the literal strings "the user's current request
+    /// (Tier 2)", "Statutes (Tier 3)", "Local Law (Tier 5)" and "live evidence
+    /// (Tier 6)" in order. It was deleted, not adjusted: it was the CI gate
+    /// that enforced an ordering *inverted* from Article II (it ranked the
+    /// constitution above the user's current turn). Its one good rule
+    /// survives, without rank vocabulary.
     #[test]
-    fn memory_guidance_matches_constitutional_tier_order() {
-        let guidance = MEMORY_GUIDANCE
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-        let current_request_at = guidance
-            .find("the user's current request (Tier 2)")
-            .expect("current request tier present");
-        let statutes_at = guidance
-            .find("Statutes (Tier 3)")
-            .expect("statutes tier present");
-        let local_law_at = guidance
-            .find("Local Law (Tier 5)")
-            .expect("local law tier present");
-        let live_evidence_at = guidance
-            .find("live evidence (Tier 6)")
-            .expect("live evidence tier present");
-
+    fn memory_guidance_keeps_the_imperative_rule_without_rank_vocabulary() {
         assert!(
-            current_request_at < statutes_at
-                && statutes_at < local_law_at
-                && local_law_at < live_evidence_at,
-            "memory guidance must keep the current request above memory and local law"
+            MEMORY_GUIDANCE.contains("is a\npreference, not a command"),
+            "memory guidance must keep the imperative-is-a-preference rule"
         );
+        for banned in ["Tier", "Statute", "Regulation", "Local Law", "Enforcement:"] {
+            assert!(
+                !MEMORY_GUIDANCE.contains(banned),
+                "memory guidance must not restate rank vocabulary; found {banned:?}"
+            );
+        }
     }
 
     #[test]
@@ -2627,6 +3000,8 @@ start it",
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
+                    active_mode: None,
+                    approval_posture: None,
                 },
             ));
         assert!(!prompt.contains("<project_context_pack>"));
@@ -2657,6 +3032,8 @@ start it",
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
+                    active_mode: None,
+                    approval_posture: None,
                 },
             ));
         assert!(prompt.contains("<project_context_pack>"));
@@ -2851,10 +3228,7 @@ start it",
 
     #[test]
     fn mode_prompts_remain_small_deltas_not_base_policy_copies() {
-        for (name, prompt) in [
-            ("agent", AGENT_MODE),
-            ("plan", PLAN_MODE),
-        ] {
+        for (name, prompt) in [("agent", AGENT_MODE), ("plan", PLAN_MODE)] {
             // Measure semantic size on LF so Windows autocrlf checkouts do not
             // inflate char/3 token estimates via extra `\r` bytes.
             let normalized = prompt.replace("\r\n", "\n").replace('\r', "\n");
@@ -2890,7 +3264,6 @@ start it",
         }
     }
 
-
     #[test]
     fn approval_policy_no_longer_inlined_in_base_prompt() {
         let prompt = compose_prompt();
@@ -2916,8 +3289,21 @@ start it",
     }
 
     #[test]
-    fn compact_template_is_included_in_full_prompt() {
+    fn compact_template_ships_only_alongside_a_handoff() {
         let tmp = tempdir().expect("tempdir");
+        let without =
+            system_prompt_flat_text(&system_prompt_for_mode_with_context(tmp.path(), None));
+        assert!(
+            !without.contains("## Compaction Relay"),
+            "#4781: the relay template must not be resident on sessions with no handoff"
+        );
+
+        std::fs::create_dir_all(tmp.path().join(".codewhale")).expect("mkdir");
+        std::fs::write(
+            tmp.path().join(HANDOFF_RELATIVE_PATH),
+            "# Session relay\n\nprior work",
+        )
+        .expect("write handoff");
         let prompt =
             system_prompt_flat_text(&system_prompt_for_mode_with_context(tmp.path(), None));
         assert!(prompt.contains("## Compaction Relay"));
@@ -2954,18 +3340,24 @@ start it",
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
+                    active_mode: None,
+                    approval_posture: None,
                 },
             ));
 
         let goal_pos = prompt.find("<session_goal>").expect("goal block");
-        let compact_pos = prompt.find("## Compaction Relay").expect("compact block");
+        // #4781 moved `COMPACT_TEMPLATE` out of the prefix, so the last
+        // static layer is now `## Core Execution`. The invariant is
+        // unchanged: the goal sits below the volatile-content boundary.
+        let boundary_pos = prompt
+            .find("## Core Execution")
+            .expect("core execution block");
 
         assert!(prompt.contains("Fix transcript corruption"));
         // Session goal is volatile content — it lives below the
-        // volatile-content boundary (after the compact template) so
-        // per-session goal changes don't bust the prefix cache for
-        // static layers.
-        assert!(compact_pos < goal_pos);
+        // volatile-content boundary so per-session goal changes don't bust
+        // the prefix cache for static layers.
+        assert!(boundary_pos < goal_pos);
         assert!(!prompt.contains("src/lib.rs"));
     }
 
@@ -2990,6 +3382,8 @@ start it",
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
+                    active_mode: None,
+                    approval_posture: None,
                 },
             ));
 
@@ -3030,14 +3424,32 @@ start it",
             LANGUAGE_PROMPT.contains("## Language") && prompt.contains("## Language"),
             "default static prompt must still include the language segment"
         );
+        // #4784: the segment was compressed from five paragraphs to five
+        // rules. Assert the *behaviors* that were hard-won, not the prose
+        // that carried them — a shorter layer must not be a weaker one.
+        for clause in [
+            // reply language comes from the latest user message
+            "latest user message",
+            // reading non-English material does not switch the reply language
+            "does not change it",
+            // mirror on the very next turn when the user switches
+            "switch on the very next turn",
+            "Never carry the previous turn's language forward",
+            // `lang` is a fallback, not an override
+            "is a fallback, not an override",
+            // code-shaped tokens stay verbatim
+            "stay in their original form",
+            // English law does not imply English replies (#4784)
+            "An English constitution never implies an English reply",
+        ] {
+            assert!(
+                LANGUAGE_PROMPT.contains(clause),
+                "compressed language segment dropped behavior {clause:?}"
+            );
+        }
         assert!(
-            LANGUAGE_PROMPT.contains("latest user message first")
-                && LANGUAGE_PROMPT.contains("README.zh-CN.md")
-                && LANGUAGE_PROMPT.contains("tool results")
-                && LANGUAGE_PROMPT
-                    .contains("even when the `lang` field in `## Environment` is `en`")
-                && LANGUAGE_PROMPT.contains("Use the `lang` field only when"),
-            "language segment must preserve the old default language-selection contract"
+            LANGUAGE_PROMPT.split_whitespace().count() < 200,
+            "language segment must stay compressed (#4781 item 4)"
         );
         assert!(
             LANGUAGE_PROMPT.contains("reasoning_content")
@@ -3082,13 +3494,15 @@ start it",
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
+                    active_mode: None,
+                    approval_posture: None,
                 },
             ));
 
         assert!(prompt.contains("## Codewhale"));
         assert!(prompt.contains("## Language"));
         assert!(prompt.contains("## Output Formatting"));
-        assert!(prompt.contains("Use the `lang` field only when"));
+        assert!(prompt.contains("is a fallback, not an override"));
     }
 
     #[test]
@@ -3288,7 +3702,6 @@ start it",
         assert!(prompt.contains("Take the work seriously. Don't take"));
         assert!(prompt.contains("Let the work speak"));
     }
-
 
     // ── Cache-prefix stability harness (#263 step 2) ───────────────────────
     //
@@ -3641,6 +4054,8 @@ start it",
                     verbosity: Some(" Concise "),
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
+                    active_mode: None,
+                    approval_posture: None,
                 },
             ),
         );
@@ -3671,6 +4086,8 @@ start it",
                 verbosity: Some("concise"),
                 skills_scan_codewhale_only: false,
                 plugin_registry: None,
+                active_mode: None,
+                approval_posture: None,
             },
         );
 
@@ -3698,7 +4115,10 @@ start it",
         assert!(flat.contains("<session_goal>"));
         assert!(flat.contains("ship WorldState Blocks"));
         assert!(flat.contains("remember the cutover"));
-        assert!(flat.contains("## Authority Recap"));
+        assert!(
+            !flat.contains("## Authority Recap"),
+            "the authority recap trailer was deleted in 0.9.2 (#4777)"
+        );
         assert!(
             !flat.contains(crate::model_context::FragmentId::SkillsTools.marker()),
             "skills remain in constitution, not a volatile SkillsTools fragment"
@@ -3720,6 +4140,8 @@ start it",
             verbosity: None,
             skills_scan_codewhale_only: false,
             plugin_registry: None,
+            active_mode: None,
+            approval_posture: None,
         };
         let first = system_prompt_for_mode_with_context_skills_session_and_approval(
             tmp.path(),

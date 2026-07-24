@@ -749,19 +749,18 @@ impl Engine {
     ) -> &'static str {
         use crate::tui::approval::ApprovalMode;
 
+        // Prompt prose lives in `prompts/text.rs`, the single prompt authority
+        // (#4779). This is selection, not authorship.
+        //
+        // STAGE 2 / #4780: delete this function and
+        // `mode_runtime_instructions` outright once the prefix-composed
+        // doctrine (`PromptSessionContext::active_mode` /
+        // `approval_posture`) is the only path.
         match approval_mode {
-            ApprovalMode::Suggest => {
-                "Tool approvals and user decisions are separate. Ask a concise question when an unresolved choice materially affects authority, cost, requested scope, or outcome; otherwise continue under the active approval policy."
-            }
-            ApprovalMode::Auto => {
-                "Auto-Review is fully autonomous. Do not ask the user questions or pause for a user decision. Resolve ambiguity from the available context, choose the safest reversible interpretation that still advances the request, and continue; if no safe in-scope action exists, report the constraint without opening a question prompt."
-            }
-            ApprovalMode::Bypass => {
-                "Tool calls do not need approval, but Full Access does not authorize invented intent. Ask one concise, deliberate question when a consequential choice cannot be recovered safely from context; otherwise proceed autonomously within the current sandbox, repository, and managed-policy boundaries."
-            }
-            ApprovalMode::Never => {
-                "Remain read-only. Ask when a missing user decision blocks a truthful plan or investigation; do not imply that this permission boundary can be bypassed."
-            }
+            ApprovalMode::Suggest => prompts::QUESTION_DISCIPLINE_SUGGEST,
+            ApprovalMode::Auto => prompts::QUESTION_DISCIPLINE_AUTO,
+            ApprovalMode::Bypass => prompts::QUESTION_DISCIPLINE_BYPASS,
+            ApprovalMode::Never => prompts::QUESTION_DISCIPLINE_NEVER,
         }
     }
 
@@ -1061,6 +1060,10 @@ impl Engine {
                     verbosity: config.verbosity.as_deref(),
                     skills_scan_codewhale_only: config.skills_scan_codewhale_only,
                     plugin_registry: Some(plugin_registry.as_ref()),
+                    // Stage 2 (#4780) populates these; see the STAGE 2 seam
+                    // note in `prompts::system_prompt_for_mode_*`.
+                    active_mode: None,
+                    approval_posture: None,
                 },
             );
         let stable_prompt = Some(system_prompt);
@@ -4339,6 +4342,10 @@ impl Engine {
                 verbosity: self.config.verbosity.as_deref(),
                 skills_scan_codewhale_only: self.config.skills_scan_codewhale_only,
                 plugin_registry: Some(self.plugin_registry.as_ref()),
+                // Stage 2 (#4780) populates these; see the STAGE 2 seam note
+                // in `prompts::system_prompt_for_mode_*`.
+                active_mode: None,
+                approval_posture: None,
             },
         );
         let stable_prompt =

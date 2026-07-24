@@ -26,9 +26,15 @@ controls do not blur together.
 - **User-global constitution** — the normal guided setup output. Manage it with
   `/constitution` or `/setup`; Codewhale stores structured data at
   `$CODEWHALE_HOME/constitution.json` (default `~/.codewhale/constitution.json`)
-  and renders it into a separate `<codewhale_user_constitution>` prose block.
-  This can express preferences and stop conditions, but it does not change
-  runtime approval policy, sandbox, shell, network, trust, or MCP permissions.
+  and renders it into a separate `<codewhale_amendments authority="4">` block
+  of numbered amendments. This can express preferences and stop conditions, but
+  it does not change runtime approval policy, sandbox, shell, network, trust, or
+  MCP permissions. Each amendment is checked on load against the entrenched
+  Articles: an amendment may always *narrow* Codewhale's latitude ("never run
+  `git push --force`") and is refused only when it tries to *enlarge* it
+  ("auto-approve all edits"). A refused amendment is voided and reported by
+  `codewhale doctor`; its number is not reused, so a gap in the sequence is the
+  evidence that something was declined. The remaining amendments still apply.
 - **Repo-local constitution** — optional project policy in
   `.codewhale/constitution.json`, described below.
 - **`AGENTS.md`** — cross-agent **project instructions** (prose). This is the
@@ -81,12 +87,11 @@ Each repo can carry two distinct, complementary files:
   {
     "schema_version": 1,
     "authority": [
-      "current user request",
-      "live code and tests",
-      "GitHub issue/PR details",
-      "AGENTS.md",
-      "memory",
-      "old handoffs"
+      "the user's request, this turn",
+      "the constitution",
+      "project law and instructions",
+      "your standing user-global preferences",
+      "memory and previous-session handoffs"
     ],
     "protected_invariants": [
       "do not break old-session transcript replay"
@@ -110,11 +115,13 @@ Each repo can carry two distinct, complementary files:
   additionally **mechanically enforced** in the tool gate. See
   [Enforced repo-law invariants](#enforced-repo-law-invariants) below.
 
-  This is the **repo-local law** layer in Codewhale's hierarchy: *bundled global
-  Constitution* → *user-global constitution* (`$CODEWHALE_HOME/constitution.json`,
-  rendered as prose) → *repo constitution* (`.codewhale/constitution.json`, this
-  file) → *AGENTS/project instructions* → *memory and handoffs* → *current
-  request and live evidence for the active turn*. Runtime policy
+  This is the **repo-local law** layer, rank 3 in Article II's ordering: *the
+  user's request this turn* → *the constitution* → *project law and instructions*
+  (`.codewhale/constitution.json`, this file, then `AGENTS.md`, nearest in scope
+  winning over the broader) → *user-global amendments*
+  (`$CODEWHALE_HOME/constitution.json`) → *memory and previous-session handoffs*.
+  That ordering is stated in Article II and nowhere else; an `authority` array
+  here restates it for the repo, it does not set it. Runtime policy
   (permissions/sandbox/cost limits enforced in code) is separate from all of
   these prompt layers. The repo constitution gives project decision rules; it
   does not replace the bundled Constitution, the user-global constitution, or

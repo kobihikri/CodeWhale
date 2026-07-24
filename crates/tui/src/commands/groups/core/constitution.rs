@@ -1100,7 +1100,7 @@ mod tests {
 
         assert!(result.message.is_none());
         let body = pop_pager_body(&mut app);
-        assert!(body.contains("<codewhale_user_constitution"));
+        assert!(body.contains("<codewhale_amendments"));
         assert!(body.contains("Maintains release lanes."));
     }
 

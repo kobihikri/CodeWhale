@@ -2774,7 +2774,7 @@ start it",
             .find("### Article II — Whose word wins")
             .expect("base prompt");
         let user_block_at = prompt
-            .find("<codewhale_user_constitution")
+            .find("<codewhale_amendments")
             .expect("user constitution block");
         let env_at = prompt
             .find("- codewhale_version:")
@@ -2835,7 +2835,7 @@ start it",
                 },
             ));
 
-        assert!(!prompt.contains("<codewhale_user_constitution"));
+        assert!(!prompt.contains("<codewhale_amendments"));
         assert!(!prompt.contains("This file should stay inactive."));
     }
 
@@ -2867,7 +2867,7 @@ start it",
                 },
             ));
 
-        assert!(!prompt.contains("<codewhale_user_constitution"));
+        assert!(!prompt.contains("<codewhale_amendments"));
     }
 
     #[test]

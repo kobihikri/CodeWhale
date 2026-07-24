@@ -5325,6 +5325,10 @@ fn doctor_setup_consistency(
     use serde_json::json;
 
     let mut issues: Vec<&'static str> = Vec::new();
+    // Voided amendments are reported with their quoted clause and Article, so a
+    // user who hand-edited constitution.json learns *which* line was refused
+    // and why instead of finding it silently missing from the prompt (#4783).
+    let mut voided_amendments: Vec<String> = Vec::new();
 
     if source == "persisted"
         && matches!(
@@ -5345,7 +5349,16 @@ fn doctor_setup_consistency(
             Ok(codewhale_config::UserConstitutionLoad::Unreadable(_)) | Err(_) => {
                 issues.push("user_constitution_unreadable");
             }
-            Ok(codewhale_config::UserConstitutionLoad::Loaded(_)) => {}
+            Ok(codewhale_config::UserConstitutionLoad::Loaded(constitution)) => {
+                voided_amendments = constitution
+                    .amendment_violations()
+                    .iter()
+                    .map(codewhale_config::AmendmentViolation::message)
+                    .collect();
+                if !voided_amendments.is_empty() {
+                    issues.push("user_constitution_has_void_amendments");
+                }
+            }
         }
     }
 
@@ -5356,6 +5369,7 @@ fn doctor_setup_consistency(
     json!({
         "status": if issues.is_empty() { "consistent" } else { "inconsistent" },
         "issues": issues,
+        "void_amendments": voided_amendments,
         "repair": "/constitution to rebuild standing law, /setup to re-run the checkpoint",
     })
 }

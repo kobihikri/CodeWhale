@@ -16,7 +16,7 @@ use crate::compaction::{estimate_input_tokens_conservative, estimate_text_tokens
 use crate::config::{ApiProvider, Config};
 use crate::context_budget::PressureLevel;
 use crate::models::{CacheControl, ContentBlock, Message, SystemPrompt, Tool};
-use crate::prompts::{COMPACT_TEMPLATE, Personality};
+use crate::prompts::COMPACT_TEMPLATE;
 use crate::route_budget::route_context_window_tokens;
 use crate::tui::app::App;
 
@@ -383,7 +383,7 @@ pub fn build_headless_context_report(config: &Config, workspace: &Path) -> Promp
 fn base_source_entries(model: &str, workspace: &Path, skills_dir: Option<&Path>) -> ReportBuilder {
     let mut builder = ReportBuilder::new();
 
-    let constitution = crate::prompts::compose_default_static_layers(Personality::Calm, model);
+    let constitution = crate::prompts::compose_default_static_layers(model);
     builder.push(SourceEntry::text(
         SourceKind::Constitution,
         "Bundled constitution, language policy, and output policy",

@@ -393,12 +393,10 @@ fn user_constitution_disabled_by_setup_state() -> bool {
 // and ordering invariants (constitution structure and binding gates #4032,
 // byte-stable prefix ordering, prefix privacy #4632).
 pub use text::{
-    AGENT_MODE, BASE_PROMPT, CALM_PERSONALITY, COMPACT_TEMPLATE, CORE_EXECUTION_PROFILE_PROMPT,
+    AGENT_MODE, BASE_PROMPT, COMPACT_TEMPLATE, CORE_EXECUTION_PROFILE_PROMPT,
     GOAL_CONTINUATION_PROMPT, LANGUAGE_PROMPT, MEMORY_GUIDANCE, OPERATE_MODE, OUTPUT_PROMPT,
-    PLAN_MODE, PLAYFUL_PERSONALITY,
+    PLAN_MODE,
 };
-#[cfg(test)]
-use text::{AGENT_PROMPT, AUTO_APPROVAL, NEVER_APPROVAL, SUGGEST_APPROVAL, YOLO_MODE};
 
 // ── Embedder prompt overrides ──
 // Let an embedder replace these compile-time prompt constants at startup,
@@ -431,8 +429,6 @@ static PROMPT_OVERRIDE_NOTICES: LazyLock<Mutex<Vec<String>>> =
 pub struct StaticPromptCtx<'a> {
     /// Active model identifier after caller-side routing.
     pub model_id: &'a str,
-    /// Personality overlay requested for the base static prompt.
-    pub personality: Personality,
     /// Default base/personality prompt layers that would be used without an
     /// override.
     pub default_layers: &'a str,
@@ -882,40 +878,6 @@ pub const SHELL_POLICY_DISABLED: &str = "Shell tools unavailable. For mandatory-
 `exec_shell`, use `code_execution` (Python sandbox). For GitHub triage, use \
 `github_issue_context` / `github_pr_context` as primary route.";
 
-// ── Personality selection ─────────────────────────────────────────────
-
-/// Which personality overlay to apply.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Personality {
-    /// Cool, spatial, reserved — the default.
-    Calm,
-    /// Warm, energetic, playful — alternative for fun mode.
-    Playful,
-}
-
-impl Personality {
-    /// Resolve from the `calm_mode` settings flag.
-    /// When `calm_mode` is true → Calm; when false → Playful (future).
-    /// For now, always returns Calm — Playful is wired but opt-in.
-    #[must_use]
-    pub fn from_settings(calm_mode: bool) -> Self {
-        if calm_mode {
-            Self::Calm
-        } else {
-            // Future: when playful mode is exposed in settings, return Playful here.
-            // For now, calm is the only default.
-            Self::Calm
-        }
-    }
-
-    fn prompt(self) -> &'static str {
-        match self {
-            Self::Calm => CALM_PERSONALITY,
-            Self::Playful => PLAYFUL_PERSONALITY,
-        }
-    }
-}
-
 // ── Composition ───────────────────────────────────────────────────────
 
 /// Compose the full system prompt in deterministic order:
@@ -1007,24 +969,20 @@ which outranks nearest-scope project law and instructions, which outrank
 standing user-global preferences, which outrank memory and previous-session
 handoffs. When in doubt, consult ### Whose word wins.";
 
-pub fn compose_prompt(personality: Personality) -> String {
-    compose_prompt_with_approval_model_and_shell(personality, "codewhale")
+pub fn compose_prompt() -> String {
+    compose_prompt_with_approval_model_and_shell("codewhale")
 }
 
-pub(crate) fn compose_prompt_with_approval_model_and_shell(
-    personality: Personality,
-    model_id: &str,
-) -> String {
-    let default_layers = compose_default_static_layers(personality, model_id);
+pub(crate) fn compose_prompt_with_approval_model_and_shell(model_id: &str) -> String {
+    let default_layers = compose_default_static_layers(model_id);
     apply_static_prompt_composer(
         effective_static_prompt_composer(),
-        personality,
         model_id,
         &default_layers,
     )
 }
 
-pub(crate) fn compose_default_static_layers(_personality: Personality, model_id: &str) -> String {
+pub(crate) fn compose_default_static_layers(model_id: &str) -> String {
     compose_default_static_layers_with_context(model_id, None)
 }
 
@@ -1046,14 +1004,12 @@ fn compose_default_static_layers_with_context(
 
 fn apply_static_prompt_composer(
     composer: Option<&StaticPromptComposer>,
-    personality: Personality,
     model_id: &str,
     default_layers: &str,
 ) -> String {
     match composer {
         Some(composer) => composer(&StaticPromptCtx {
             model_id,
-            personality,
             default_layers,
         }),
         None => default_layers.to_string(),
@@ -1147,7 +1103,6 @@ pub fn system_prompt_for_mode_with_context_skills_session_and_approval(
     );
     let mode_prompt = apply_static_prompt_composer(
         effective_static_prompt_composer(),
-        Personality::Calm,
         session_context.model_id,
         &default_layers,
     );
@@ -1558,7 +1513,6 @@ mod tests {
             .expect_err("second composer should be rejected");
         let ctx = StaticPromptCtx {
             model_id: "deepseek-v4-pro",
-            personality: Personality::Calm,
             default_layers: "fallback",
         };
 
@@ -1571,25 +1525,18 @@ mod tests {
 
     #[test]
     fn static_prompt_composer_unset_keeps_default_layers_byte_identical() {
-        for personality in [Personality::Calm, Personality::Playful] {
-            let default_layers = compose_default_static_layers(personality, "deepseek-v4-flash");
-            let composed = apply_static_prompt_composer(
-                None,
-                personality,
-                "deepseek-v4-flash",
-                &default_layers,
-            );
+        let default_layers = compose_default_static_layers("deepseek-v4-flash");
+        let composed =
+            apply_static_prompt_composer(None, "deepseek-v4-flash", &default_layers);
 
-            assert_byte_identical("unset static prompt composer", &default_layers, &composed);
-        }
+        assert_byte_identical("unset static prompt composer", &default_layers, &composed);
     }
 
     #[test]
     fn static_prompt_composer_receives_context_and_replaces_layers() {
-        let default_layers = compose_default_static_layers(Personality::Calm, "deepseek-v4-pro");
+        let default_layers = compose_default_static_layers("deepseek-v4-pro");
         let composer: Box<StaticPromptComposer> = Box::new(|ctx| {
             assert_eq!(ctx.model_id, "deepseek-v4-pro");
-            assert_eq!(ctx.personality, Personality::Calm);
             // The 0.9.0 core is model-agnostic ("You are Codewhale") and
             // folds tone in — no per-model id line, no separate personality
             // section in default_layers.
@@ -1605,7 +1552,6 @@ mod tests {
 
         let composed = apply_static_prompt_composer(
             Some(composer.as_ref()),
-            Personality::Calm,
             "deepseek-v4-pro",
             &default_layers,
         );
@@ -1657,16 +1603,17 @@ start it",
             "You are Codewhale",
             "The A is already yours",
             "Let the work speak",
-            "### Ground truth",
-            "### Verify before you claim",
+            "### Article I — Ground truth",
             "### Do what's asked",
             "### Keep momentum",
             "### Think in causes",
             "### Honor constraints before preferences",
             "### Restraint",
-            "### Put guarantees in mechanism",
             "### Leave continuity",
-            "### Whose word wins",
+            "### Article II — Whose word wins",
+            "### Article III — Limits on delegation",
+            "### Article IV — Unresolved conflict",
+            "### Article V — Amendment",
         ] {
             assert!(
                 BASE_PROMPT.contains(phrase),
@@ -1700,8 +1647,8 @@ start it",
     #[test]
     fn constitutional_hierarchy_keeps_user_turn_above_local_law() {
         let heading_at = BASE_PROMPT
-            .find("### Whose word wins")
-            .expect("Whose word wins heading present");
+            .find("### Article II — Whose word wins")
+            .expect("Article II heading present");
         let user_at = BASE_PROMPT
             .find("1. The user's request, this turn.")
             .expect("user request tier present");
@@ -1782,7 +1729,7 @@ start it",
     #[test]
     fn compose_prompt_for_v4_model_stays_model_fact_free() {
         let prompt =
-            compose_prompt_with_approval_model_and_shell(Personality::Calm, "deepseek-v4-pro");
+            compose_prompt_with_approval_model_and_shell("deepseek-v4-pro");
         assert!(prompt.contains("You are Codewhale"));
         assert!(!prompt.contains("Your V4 Characteristics"));
         assert!(!prompt.contains("one-million-token context window"));
@@ -1792,7 +1739,7 @@ start it",
     #[test]
     fn compose_prompt_for_kimi_stays_model_fact_free() {
         let prompt =
-            compose_prompt_with_approval_model_and_shell(Personality::Calm, "moonshotai/kimi-k2.6");
+            compose_prompt_with_approval_model_and_shell("moonshotai/kimi-k2.6");
         assert!(prompt.contains("You are Codewhale"));
         assert!(!prompt.contains("Your V4 Characteristics"));
         assert!(!prompt.contains("one-million"));
@@ -1804,7 +1751,7 @@ start it",
 
     #[test]
     fn compose_prompt_for_openai_api_gpt_55_stays_model_fact_free() {
-        let prompt = compose_prompt_with_approval_model_and_shell(Personality::Calm, "gpt-5.5");
+        let prompt = compose_prompt_with_approval_model_and_shell("gpt-5.5");
         assert!(prompt.contains("You are Codewhale"));
         assert!(!prompt.contains("Your V4 Characteristics"));
         assert!(!prompt.contains("1050000-token context window"));
@@ -1816,7 +1763,7 @@ start it",
     #[test]
     fn compose_prompt_for_unknown_model_stays_model_fact_free() {
         let prompt =
-            compose_prompt_with_approval_model_and_shell(Personality::Calm, "llama3.3:70b");
+            compose_prompt_with_approval_model_and_shell("llama3.3:70b");
         assert!(prompt.contains("You are Codewhale"));
         assert!(!prompt.contains("Your V4 Characteristics"));
         assert!(!prompt.contains("one-million"));
@@ -1846,9 +1793,9 @@ start it",
         // 0.9.0 keeps the preamble byte-for-byte the same regardless of
         // model id, and no {model_id} placeholder leaks.
         let flash =
-            compose_prompt_with_approval_model_and_shell(Personality::Calm, "deepseek-v4-flash");
+            compose_prompt_with_approval_model_and_shell("deepseek-v4-flash");
         let kimi =
-            compose_prompt_with_approval_model_and_shell(Personality::Calm, "moonshotai/kimi-k2.6");
+            compose_prompt_with_approval_model_and_shell("moonshotai/kimi-k2.6");
         assert!(
             flash.contains("You are Codewhale"),
             "0.9.0 preamble must open with the model-agnostic Codewhale stance"
@@ -1885,7 +1832,7 @@ start it",
     #[test]
     fn composed_prompt_no_longer_inlines_tool_taxonomy() {
         let prompt =
-            compose_prompt_with_approval_model_and_shell(Personality::Calm, "deepseek-v4-pro");
+            compose_prompt_with_approval_model_and_shell("deepseek-v4-pro");
         // The core tool taxonomy (grep_files / git_status / run_tests hints)
         // is no longer prepended as a standalone "## Core Tool Taxonomy" block.
         // It now lives inside the "## Runtime Policy Reference" section of the
@@ -2022,24 +1969,6 @@ start it",
         .expect("skill file");
     }
 
-    #[test]
-    fn constitution_has_no_separate_personality_tier() {
-        // 0.9.0 has no personality tier. Voice and tone live in the
-        // compact constitution rather than a separate section, so
-        // personality remains folded in by omission.
-        let prompt = compose_prompt(Personality::Calm);
-        assert!(
-            !prompt.contains("Personality: Calm — Tier 8"),
-            "Personality tier should not appear as a separate section"
-        );
-        assert!(
-            prompt.contains("Take the work seriously. Don't take"),
-            "Preamble should carry tone guidance (take the work, not yourself, seriously)"
-        );
-        // Verify the preamble still carries the Codewhale identity.
-        assert!(prompt.contains("You are Codewhale"));
-        assert!(prompt.contains("Let the work speak"));
-    }
 
     #[test]
     fn execution_discipline_lives_in_agent_mode_after_core_constitution() {
@@ -2466,7 +2395,9 @@ start it",
                 },
             ));
 
-        let base_at = prompt.find("### Whose word wins").expect("base prompt");
+        let base_at = prompt
+            .find("### Article II — Whose word wins")
+            .expect("base prompt");
         let user_block_at = prompt
             .find("<codewhale_user_constitution")
             .expect("user constitution block");
@@ -2775,10 +2706,10 @@ start it",
 
     #[test]
     fn compose_prompt_includes_all_layers() {
-        let prompt = compose_prompt(Personality::Calm);
+        let prompt = compose_prompt();
         // Base layer — balanced Constitution; procedural recipes stay out.
         assert!(prompt.contains("## Codewhale"));
-        assert!(prompt.contains("### Whose word wins"));
+        assert!(prompt.contains("### Article II — Whose word wins"));
         assert!(!prompt.contains("## STATUTES (Tier 2)"));
         assert!(!prompt.contains("## EVIDENCE (Tier 6)"));
         // Mode and approval are not inlined — they travel as
@@ -2798,16 +2729,17 @@ start it",
         let mut cursor = 0usize;
         for needle in [
             "## Codewhale",
-            "### Ground truth",
-            "### Verify before you claim",
+            "### Article I — Ground truth",
             "### Do what's asked",
             "### Keep momentum",
             "### Think in causes",
             "### Honor constraints before preferences",
             "### Restraint",
-            "### Put guarantees in mechanism",
             "### Leave continuity",
-            "### Whose word wins",
+            "### Article II — Whose word wins",
+            "### Article III — Limits on delegation",
+            "### Article IV — Unresolved conflict",
+            "### Article V — Amendment",
         ] {
             let pos = md
                 .find(needle)
@@ -2869,9 +2801,9 @@ start it",
 
     #[test]
     fn compose_prompt_deterministic_order() {
-        let prompt = compose_prompt(Personality::Calm);
+        let prompt = compose_prompt();
         let base_pos = prompt.find("## Codewhale").unwrap();
-        let article_pos = prompt.find("### Ground truth").unwrap();
+        let article_pos = prompt.find("### Article I — Ground truth").unwrap();
 
         assert!(base_pos < article_pos);
     }
@@ -2880,7 +2812,7 @@ start it",
     fn base_prompt_is_mode_agnostic() {
         // Mode and approval text are no longer inlined into compose_prompt —
         // they travel as request-time runtime metadata.
-        let prompt = compose_prompt(Personality::Calm);
+        let prompt = compose_prompt();
         assert!(!prompt.contains("Mode: Agent"));
         assert!(!prompt.contains("Mode: YOLO"));
         assert!(!prompt.contains("Mode: Plan"));
@@ -2922,7 +2854,6 @@ start it",
         for (name, prompt) in [
             ("agent", AGENT_MODE),
             ("plan", PLAN_MODE),
-            ("yolo", YOLO_MODE),
         ] {
             // Measure semantic size on LF so Windows autocrlf checkouts do not
             // inflate char/3 token estimates via extra `\r` bytes.
@@ -2959,38 +2890,10 @@ start it",
         }
     }
 
-    #[test]
-    fn mode_prompts_do_not_inline_full_approval_policy_overlays() {
-        for (name, mode_prompt) in [
-            ("agent", AGENT_MODE),
-            ("plan", PLAN_MODE),
-            ("yolo", YOLO_MODE),
-        ] {
-            for (approval_name, approval_prompt) in [
-                ("auto", AUTO_APPROVAL),
-                ("suggest", SUGGEST_APPROVAL),
-                ("never", NEVER_APPROVAL),
-            ] {
-                assert!(
-                    !mode_prompt.contains(approval_prompt.trim()),
-                    "{name} mode prompt must not inline the full {approval_name} approval overlay"
-                );
-            }
-        }
-
-        assert!(
-            PLAN_MODE.contains("All writes, patches, shell commands"),
-            "Plan may summarize the user-facing mode delta"
-        );
-        assert!(
-            NEVER_APPROVAL.contains("This approval policy is a Tier 2 Statute"),
-            "the approval overlay keeps the policy authority explanation"
-        );
-    }
 
     #[test]
     fn approval_policy_no_longer_inlined_in_base_prompt() {
-        let prompt = compose_prompt(Personality::Calm);
+        let prompt = compose_prompt();
         assert!(!prompt.contains("Mode: Agent"));
         assert!(!prompt.contains("Approval Policy:"));
         // The compact Constitutional preamble is still present.
@@ -3002,8 +2905,8 @@ start it",
         // v4 has no separate personality tier. Voice and tone live in
         // the preamble, so both Calm and Playful compose_prompt calls
         // produce identical output (no personality overlay is appended).
-        let calm = compose_prompt(Personality::Calm);
-        let playful = compose_prompt(Personality::Playful);
+        let calm = compose_prompt();
+        let playful = compose_prompt();
         assert_eq!(
             calm, playful,
             "personality enum is a no-op — both produce identical output"
@@ -3096,7 +2999,7 @@ start it",
 
     #[test]
     fn agent_mode_tool_guidance_avoids_defensive_tool_suppression() {
-        let prompt = compose_prompt(Personality::Calm);
+        let prompt = compose_prompt();
         assert!(!prompt.contains("Tool Selection Guide"));
         for tool in ["`File`", "`Git`", "`Run`", "`Bash`"] {
             assert!(AGENT_MODE.contains(tool));
@@ -3118,7 +3021,7 @@ start it",
     /// reinforcement lives in its own static segment plus locale bookends.
     #[test]
     fn language_segment_present_outside_reduced_constitution() {
-        let prompt = compose_prompt(Personality::Calm);
+        let prompt = compose_prompt();
         assert!(
             !BASE_PROMPT.contains("## Language"),
             "0.9.0 constitution.md should stay reduced; language belongs in its own segment"
@@ -3147,7 +3050,7 @@ start it",
 
     #[test]
     fn output_formatting_segment_present_outside_reduced_constitution() {
-        let prompt = compose_prompt(Personality::Calm);
+        let prompt = compose_prompt();
         assert!(
             !BASE_PROMPT.contains("## Output Formatting"),
             "0.9.0 constitution.md should stay reduced; output formatting belongs in its own segment"
@@ -3208,7 +3111,7 @@ start it",
 
     #[test]
     fn english_base_prompt_avoids_native_script_language_priming() {
-        let prompt = compose_prompt(Personality::Calm);
+        let prompt = compose_prompt();
         assert!(
             !contains_cjk(&prompt),
             "English base prompt should keep native-script reinforcement in locale bookends only"
@@ -3255,7 +3158,7 @@ start it",
     /// by project law/instructions sitting above memory/handoffs.
     #[test]
     fn project_instructions_outrank_memory_in_whose_word_wins() {
-        let prompt = compose_prompt(Personality::Calm);
+        let prompt = compose_prompt();
         let project_at = prompt
             .find("3. Project law and instructions")
             .expect("Whose word wins must rank project instructions");
@@ -3271,7 +3174,7 @@ start it",
 
     #[test]
     fn workspace_orientation_guidance_present() {
-        let prompt = compose_prompt(Personality::Calm);
+        let prompt = compose_prompt();
         assert!(prompt.contains("Project law and instructions"));
         assert!(
             prompt.contains("the nearest in\nscope winning over the broader")
@@ -3379,18 +3282,13 @@ start it",
 
     #[test]
     fn preamble_carries_tone_and_ownership_guidance() {
-        let prompt = compose_prompt(Personality::Calm);
+        let prompt = compose_prompt();
         assert!(prompt.contains("The A is already yours"));
         assert!(prompt.contains("Your competence is a settled fact"));
         assert!(prompt.contains("Take the work seriously. Don't take"));
         assert!(prompt.contains("Let the work speak"));
     }
 
-    #[test]
-    fn legacy_constants_still_available() {
-        // Verify the legacy .txt constant still compiles and contains expected content
-        assert!(AGENT_PROMPT.lines().next().is_some());
-    }
 
     // ── Cache-prefix stability harness (#263 step 2) ───────────────────────
     //
@@ -3404,17 +3302,11 @@ start it",
     #[test]
     fn compose_prompt_is_byte_stable_across_calls() {
         // Suspect #4 from #263: mode prompt churn within a single mode.
-        // Two calls with identical (mode, personality) inputs must produce
-        // identical bytes — anything else is a cache buster.
-        for personality in [Personality::Calm, Personality::Playful] {
-            let a = compose_prompt(personality);
-            let b = compose_prompt(personality);
-            assert_byte_identical(
-                &format!("compose_prompt(personality={personality:?})"),
-                &a,
-                &b,
-            );
-        }
+        // Two calls with identical inputs must produce identical bytes —
+        // anything else is a cache buster.
+        let a = compose_prompt();
+        let b = compose_prompt();
+        assert_byte_identical("compose_prompt()", &a, &b);
     }
 
     #[test]
@@ -3759,20 +3651,6 @@ start it",
         );
     }
 
-    /// #2953 — the Calm overlay (`CALM_PERSONALITY`) stays out of the default
-    /// model-prompt path to keep the static prefix slim. Voice and tone
-    /// guidance travels via the constitution preamble instead.
-    #[test]
-    fn default_prompt_does_not_include_calm_personality_overlay() {
-        let prompt = compose_prompt(Personality::Calm);
-        let calm_text = CALM_PERSONALITY;
-        let first_calm_line = calm_text.lines().find(|l| !l.is_empty()).unwrap_or("");
-        assert!(
-            !prompt.contains(first_calm_line),
-            "default agent prompt must not include the calm personality overlay"
-        );
-    }
-
     #[test]
     fn live_prompt_path_returns_world_state_blocks_with_markers() {
         let tmp = tempdir().expect("tempdir");
@@ -3902,7 +3780,7 @@ start it",
     #[test]
     fn default_prompt_stays_under_2953_static_baseline() {
         const ISSUE_2953_BASELINE_CHARS: usize = 30_461;
-        let prompt = compose_prompt(Personality::Calm);
+        let prompt = compose_prompt();
 
         assert!(
             prompt.chars().count() < ISSUE_2953_BASELINE_CHARS,

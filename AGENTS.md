@@ -62,19 +62,6 @@
   (`git rev-parse` ~10ms, 18-core machine). Treat the freeze as closed and spend
   effort elsewhere rather than on a speculative `spawn_blocking` fix.
 
-## Filing and closing issues
-
-Issue hygiene rules live in [CONTRIBUTING.md](CONTRIBUTING.md#reporting-issues).
-Two that bind agents specifically:
-
-- A PR that lands **any part** of an issue edits that issue's body in the same
-  PR — strike satisfied criteria, delete now-false Evidence lines. Half-stale
-  bodies cost more than stale ones because the plausible parts get trusted.
-- Never close an issue as already-done without citing the `file:line` that
-  proves it. "Looks implemented" is how live work gets silently lost.
-
-Treat an issue body as a claim to verify, not a description to trust.
-
 ## CodeWhale Stewardship
 
 - Treat community contributors as partners. Good-faith PRs, issue reports,

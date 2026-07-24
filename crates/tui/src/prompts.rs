@@ -1594,10 +1594,7 @@ mod tests {
             // folds tone in — no per-model id line, no separate personality
             // section in default_layers.
             assert!(ctx.default_layers.contains("You are Codewhale"));
-            assert!(
-                ctx.default_layers
-                    .contains("Take the work seriously. Don't take")
-            );
+            assert!(ctx.default_layers.contains("The A is already yours"));
             assert!(!ctx.default_layers.contains("## Core Tool Taxonomy"));
             assert!(!ctx.default_layers.contains("Approval Policy"));
             "embedder static prompt".to_string()
@@ -1965,14 +1962,7 @@ start it",
             "## Codewhale",
             "You are Codewhale",
             "The A is already yours",
-            "Let the work speak",
             "### Article I — Ground truth",
-            "### Do what's asked",
-            "### Keep momentum",
-            "### Think in causes",
-            "### Honor constraints before preferences",
-            "### Restraint",
-            "### Leave continuity",
             "### Article II — Whose word wins",
             "### Article III — Limits on delegation",
             "### Article IV — Unresolved conflict",
@@ -1985,15 +1975,29 @@ start it",
         }
     }
 
+    /// 0.9.2 blue-ocean cut (#4785). `BASE_PROMPT` is the one block resident
+    /// in every session, so its size is a product decision, not an accident.
+    /// The Articles rewrite grew it from 1,533 to 1,920 estimated tokens
+    /// before this ceiling existed. Raising this number is allowed only as a
+    /// deliberate, reviewed act — not as the fix for a red build.
+    #[test]
+    fn base_prompt_stays_under_its_token_ceiling() {
+        // Release convention: 4.0 chars per token.
+        let estimated_tokens = BASE_PROMPT.len() / 4;
+        assert!(
+            estimated_tokens <= 550,
+            "BASE_PROMPT grew to ~{estimated_tokens} estimated tokens; the constitution \
+             is the five Articles and an identity line, nothing else"
+        );
+    }
+
     #[test]
     fn base_prompt_carries_balanced_behavioral_priors() {
         for phrase in [
-            "action is the default",
-            "Autonomy has a boundary",
-            "Hold more than one plausible cause",
-            "Hard constraints are gates",
-            "mechanism carries it",
-            "so the next turn can continue",
+            "Verification is proportional to the",
+            "Authority is carried by mechanism",
+            "A tie you cannot break is not yours to break",
+            "Recall never amends",
         ] {
             assert!(
                 BASE_PROMPT.contains(phrase),
@@ -2022,7 +2026,7 @@ start it",
             .find("3. Project law and instructions")
             .expect("project tier present");
         let preference_at = BASE_PROMPT
-            .find("4. Your standing user-global preferences.")
+            .find("4. Standing user preferences and amendments.")
             .expect("user-global preference tier present");
         let memory_at = BASE_PROMPT
             .find("5. Memory and previous-session handoffs.")
@@ -2038,7 +2042,7 @@ start it",
              project law, standing user-global preferences, then memory/handoffs"
         );
         assert!(
-            BASE_PROMPT.contains("the user may override a fact, but no one may invent\none"),
+            BASE_PROMPT.contains("the user may override a fact, no one may invent one"),
             "Whose word wins must keep ground truth overridable but never inventable"
         );
         assert!(
@@ -3107,12 +3111,6 @@ start it",
         for needle in [
             "## Codewhale",
             "### Article I — Ground truth",
-            "### Do what's asked",
-            "### Keep momentum",
-            "### Think in causes",
-            "### Honor constraints before preferences",
-            "### Restraint",
-            "### Leave continuity",
             "### Article II — Whose word wins",
             "### Article III — Limits on delegation",
             "### Article IV — Unresolved conflict",
@@ -3196,7 +3194,7 @@ start it",
         assert!(!prompt.contains("Approval Policy:"));
         // Base prompt carries the 0.9.0 compact Constitution.
         assert!(prompt.contains("You are Codewhale"));
-        assert!(prompt.contains("Take the work seriously. Don't take"));
+        assert!(prompt.contains("The A is already yours"));
     }
 
     #[test]
@@ -3284,7 +3282,7 @@ start it",
             calm, playful,
             "personality enum is a no-op — both produce identical output"
         );
-        assert!(calm.contains("Take the work seriously. Don't take"));
+        assert!(calm.contains("The A is already yours"));
         assert!(calm.contains("You are Codewhale"));
     }
 
@@ -3591,8 +3589,8 @@ start it",
         let prompt = compose_prompt();
         assert!(prompt.contains("Project law and instructions"));
         assert!(
-            prompt.contains("the nearest in\nscope winning over the broader")
-                || prompt.contains("the nearest in scope winning over the broader"),
+            prompt.contains("nearest in scope over broader")
+                || prompt.contains("nearest in scope over\nbroader"),
             "Whose word wins must keep the nearest-scope-wins rule for project instructions"
         );
     }
@@ -3698,9 +3696,7 @@ start it",
     fn preamble_carries_tone_and_ownership_guidance() {
         let prompt = compose_prompt();
         assert!(prompt.contains("The A is already yours"));
-        assert!(prompt.contains("Your competence is a settled fact"));
-        assert!(prompt.contains("Take the work seriously. Don't take"));
-        assert!(prompt.contains("Let the work speak"));
+        assert!(prompt.contains("Nothing below asks"));
     }
 
     // ── Cache-prefix stability harness (#263 step 2) ───────────────────────

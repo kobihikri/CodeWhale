@@ -14,7 +14,7 @@ Customer-visible copy also follows the [Codewhale voice and terminal
 charter](VOICE.md); commands, key names, and glyphs remain code-owned around
 localized prose.
 
-Last updated: 2026-07-12.
+Last updated: 2026-07-24.
 Source-of-truth README: `README.md` (English, post-#3087).
 
 ## Status legend
@@ -37,7 +37,7 @@ Source-of-truth README: `README.md` (English, post-#3087).
 | Japanese | `ja` | **planned** | README exists (`README.ja-JP.md`); website route not yet live. Depends on locale-switcher supporting >2 languages and dictionary scaffolding (#3091). |
 | Vietnamese | `vi` | **planned** | README exists (`README.vi.md`); same dependencies as Japanese (#3091). |
 | Korean | `ko` | **planned** | README exists (`README.ko-KR.md`); #3093 next-wave locale. |
-| Russian | `ru` | **planned** | **Next-priority locale.** No README yet; explicitly scoped for #3092. Latin+Cyrillic layout is established in the CSS font stack; needs dictionary + route scaffolding. |
+| Russian | `ru` | **planned** | **Next-priority locale.** No README yet; explicitly scoped for #3092. Cyrillic is **not** covered by the current webfonts — all four `next/font/google` families in `web/app/[locale]/layout.tsx` load `subsets: ["latin"]` only, so Cyrillic falls through to the `system-ui` fallback in `web/app/globals.css`. Needs a font-subset decision plus dictionary + route scaffolding. |
 | Spanish | `es` | **deferred** | #3093 next-wave. |
 | Brazilian Portuguese | `pt-BR` | **deferred** | #3093 next-wave. |
 | Arabic | `ar` | **deferred** | RTL candidate. Deferred until layout/typography QA exists (bidirectional text, mirrored chrome, number formatting). |
@@ -51,13 +51,16 @@ Source-of-truth README: `README.md` (English, post-#3087).
 | Japanese | `README.ja-JP.md` | **shipped** | Manual review per release |
 | Vietnamese | `README.vi.md` | **shipped** | Manual review per release |
 | Korean | `README.ko-KR.md` | **shipped** | Manual review per release |
+| Spanish (LatAm) | `README.es-419.md` | **shipped** | Machine-translated 2026-07-12; awaiting native review |
+| Brazilian Portuguese | `README.pt-BR.md` | **shipped** | Machine-translated 2026-07-12; awaiting native review |
 | Russian | _(not yet created)_ | **planned** | #3092 |
 
 ## Drift checks
 
 | Check | Tool | Status |
 |-------|------|--------|
-| README locale links symmetric | `scripts/check-readme-locales.sh` | Planned |
+| README locale links symmetric | `scripts/check-readme-locales.sh` | **Enforced** in CI (`.github/workflows/ci.yml`). Guards main-README ↔ file existence both ways; does *not* check cross-links between translations. |
+| README translations in sync | `scripts/check-readme-translations.py` | **Enforced** in CI (`.github/workflows/ci.yml`) |
 | Website dictionaries cover all shipped locales | `npm run check:locales` (vitest) | Planned |
 | Accept-Language routes to all shipped locales | Middleware test | Planned |
 | Locale selector lists all shipped locales | Component test | Planned |

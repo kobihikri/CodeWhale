@@ -1526,8 +1526,7 @@ mod tests {
     #[test]
     fn static_prompt_composer_unset_keeps_default_layers_byte_identical() {
         let default_layers = compose_default_static_layers("deepseek-v4-flash");
-        let composed =
-            apply_static_prompt_composer(None, "deepseek-v4-flash", &default_layers);
+        let composed = apply_static_prompt_composer(None, "deepseek-v4-flash", &default_layers);
 
         assert_byte_identical("unset static prompt composer", &default_layers, &composed);
     }
@@ -1728,8 +1727,7 @@ start it",
 
     #[test]
     fn compose_prompt_for_v4_model_stays_model_fact_free() {
-        let prompt =
-            compose_prompt_with_approval_model_and_shell("deepseek-v4-pro");
+        let prompt = compose_prompt_with_approval_model_and_shell("deepseek-v4-pro");
         assert!(prompt.contains("You are Codewhale"));
         assert!(!prompt.contains("Your V4 Characteristics"));
         assert!(!prompt.contains("one-million-token context window"));
@@ -1738,8 +1736,7 @@ start it",
 
     #[test]
     fn compose_prompt_for_kimi_stays_model_fact_free() {
-        let prompt =
-            compose_prompt_with_approval_model_and_shell("moonshotai/kimi-k2.6");
+        let prompt = compose_prompt_with_approval_model_and_shell("moonshotai/kimi-k2.6");
         assert!(prompt.contains("You are Codewhale"));
         assert!(!prompt.contains("Your V4 Characteristics"));
         assert!(!prompt.contains("one-million"));
@@ -1762,8 +1759,7 @@ start it",
 
     #[test]
     fn compose_prompt_for_unknown_model_stays_model_fact_free() {
-        let prompt =
-            compose_prompt_with_approval_model_and_shell("llama3.3:70b");
+        let prompt = compose_prompt_with_approval_model_and_shell("llama3.3:70b");
         assert!(prompt.contains("You are Codewhale"));
         assert!(!prompt.contains("Your V4 Characteristics"));
         assert!(!prompt.contains("one-million"));
@@ -1792,10 +1788,8 @@ start it",
     fn compose_prompt_is_model_agnostic_in_preamble() {
         // 0.9.0 keeps the preamble byte-for-byte the same regardless of
         // model id, and no {model_id} placeholder leaks.
-        let flash =
-            compose_prompt_with_approval_model_and_shell("deepseek-v4-flash");
-        let kimi =
-            compose_prompt_with_approval_model_and_shell("moonshotai/kimi-k2.6");
+        let flash = compose_prompt_with_approval_model_and_shell("deepseek-v4-flash");
+        let kimi = compose_prompt_with_approval_model_and_shell("moonshotai/kimi-k2.6");
         assert!(
             flash.contains("You are Codewhale"),
             "0.9.0 preamble must open with the model-agnostic Codewhale stance"
@@ -1831,8 +1825,7 @@ start it",
 
     #[test]
     fn composed_prompt_no_longer_inlines_tool_taxonomy() {
-        let prompt =
-            compose_prompt_with_approval_model_and_shell("deepseek-v4-pro");
+        let prompt = compose_prompt_with_approval_model_and_shell("deepseek-v4-pro");
         // The core tool taxonomy (grep_files / git_status / run_tests hints)
         // is no longer prepended as a standalone "## Core Tool Taxonomy" block.
         // It now lives inside the "## Runtime Policy Reference" section of the
@@ -1968,7 +1961,6 @@ start it",
         )
         .expect("skill file");
     }
-
 
     #[test]
     fn execution_discipline_lives_in_agent_mode_after_core_constitution() {
@@ -2851,10 +2843,7 @@ start it",
 
     #[test]
     fn mode_prompts_remain_small_deltas_not_base_policy_copies() {
-        for (name, prompt) in [
-            ("agent", AGENT_MODE),
-            ("plan", PLAN_MODE),
-        ] {
+        for (name, prompt) in [("agent", AGENT_MODE), ("plan", PLAN_MODE)] {
             // Measure semantic size on LF so Windows autocrlf checkouts do not
             // inflate char/3 token estimates via extra `\r` bytes.
             let normalized = prompt.replace("\r\n", "\n").replace('\r', "\n");
@@ -2889,7 +2878,6 @@ start it",
             }
         }
     }
-
 
     #[test]
     fn approval_policy_no_longer_inlined_in_base_prompt() {
@@ -3288,7 +3276,6 @@ start it",
         assert!(prompt.contains("Take the work seriously. Don't take"));
         assert!(prompt.contains("Let the work speak"));
     }
-
 
     // ── Cache-prefix stability harness (#263 step 2) ───────────────────────
     //

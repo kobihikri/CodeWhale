@@ -1559,7 +1559,13 @@ async fn process_app_request(
             };
             let ok = result.is_ok();
             let message = result.err().map(|e| e.to_string());
-            apply_config_update(state, snapshot, None, true).await;
+            // A rejected write left `state.config` untouched (`set_value`
+            // validates before mutating), so pushing a config update — and
+            // with it `invalidate_stdio_bridge` — would kill the runtime
+            // bridge for what the caller sees as a no-op error (#4737).
+            if ok {
+                apply_config_update(state, snapshot, None, true).await;
+            }
             AppResponse {
                 ok,
                 data: json!({ "key": key, "value": value, "error": message }),
@@ -1574,7 +1580,11 @@ async fn process_app_request(
             };
             let ok = result.is_ok();
             let message = result.err().map(|e| e.to_string());
-            apply_config_update(state, snapshot, None, true).await;
+            // Same no-op contract as `ConfigSet`: a failed unset must not
+            // invalidate the cached stdio bridge (#4737).
+            if ok {
+                apply_config_update(state, snapshot, None, true).await;
+            }
             AppResponse {
                 ok,
                 data: json!({ "key": key, "error": message }),
@@ -2132,6 +2142,41 @@ mod tests {
         // The cached bridge child must be dropped so the next stdio request
         // spawns a fresh runtime that reads the persisted config.
         assert!(state.stdio_bridge.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn rejected_config_set_keeps_cached_stdio_bridge() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_path = tmp.path().join("config.toml");
+        fs::write(&config_path, "model = \"deepseek-chat\"\n").expect("write config");
+        let state = build_state(Some(config_path.clone()), None).expect("state");
+        seed_test_bridge(&state).await;
+
+        // An unknown provider is rejected by `set_value` before it mutates
+        // anything, so the request is a no-op and must not tear down the
+        // cached bridge.
+        let response = process_app_request(
+            &state,
+            AppRequest::ConfigSet {
+                key: "provider".to_string(),
+                value: "definitely-not-a-provider".to_string(),
+            },
+            AppTransport::Stdio,
+        )
+        .await;
+        assert!(!response.ok, "set should fail");
+
+        assert!(
+            state.stdio_bridge.lock().await.is_some(),
+            "rejected set must not invalidate the cached bridge"
+        );
+        // And nothing was persisted or pushed into the runtime.
+        {
+            let runtime = state.runtime.read().await;
+            assert_eq!(runtime.config.model.as_deref(), Some("deepseek-chat"));
+        }
+        let persisted = fs::read_to_string(&config_path).expect("read config");
+        assert_eq!(persisted, "model = \"deepseek-chat\"\n");
     }
 
     #[tokio::test]

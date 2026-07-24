@@ -1039,9 +1039,11 @@ dependencies = [
  "chrono",
  "codewhale-protocol",
  "dirs",
+ "fd-lock",
  "rusqlite",
  "serde",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]

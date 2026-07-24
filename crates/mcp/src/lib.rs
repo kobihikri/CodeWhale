@@ -1,12 +1,17 @@
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::io::{BufRead, Write};
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::Mutex;
 
 use anyhow::{Context, Result, bail};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+/// MCP protocol revision advertised during the `initialize` handshake.
+const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 
 /// Configuration for a single MCP server process.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,6 +195,211 @@ impl McpManagedClient for InMemoryMcpClient {
             .get(uri)
             .cloned()
             .with_context(|| format!("resource '{uri}' not found"))
+    }
+}
+
+/// An MCP client backed by a real child process speaking JSON-RPC 2.0 over stdio.
+///
+/// This is the transport used by `codewhale mcp-server`: the configured
+/// `command`/`args`/`env` are actually spawned and every `tools/*` and
+/// `resources/*` request is forwarded to that process. Nothing here fabricates a
+/// response — a server that cannot be spawned or that answers with a JSON-RPC
+/// error surfaces as an error to the caller.
+pub struct ChildProcessMcpClient {
+    server_name: String,
+    conn: Mutex<ChildRpcConnection>,
+}
+
+struct ChildRpcConnection {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+    next_id: u64,
+}
+
+impl ChildProcessMcpClient {
+    /// Spawn `config.command` and perform the MCP `initialize` handshake.
+    pub fn spawn(config: &McpServerConfig) -> Result<Self> {
+        if config.command.trim().is_empty() {
+            bail!(
+                "MCP server '{}' has no command configured; refusing to serve stub responses",
+                config.name
+            );
+        }
+        let mut child = Command::new(&config.command)
+            .args(&config.args)
+            .envs(&config.env)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .with_context(|| {
+                format!(
+                    "failed to spawn MCP server '{}' ({})",
+                    config.name, config.command
+                )
+            })?;
+        let stdin = child
+            .stdin
+            .take()
+            .context("spawned MCP server has no stdin")?;
+        let stdout = child
+            .stdout
+            .take()
+            .context("spawned MCP server has no stdout")?;
+
+        let client = Self {
+            server_name: config.name.clone(),
+            conn: Mutex::new(ChildRpcConnection {
+                child,
+                stdin,
+                stdout: BufReader::new(stdout),
+                next_id: 1,
+            }),
+        };
+        client.handshake()?;
+        Ok(client)
+    }
+
+    fn handshake(&self) -> Result<()> {
+        self.request(
+            "initialize",
+            json!({
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": { "name": "codewhale", "version": env!("CARGO_PKG_VERSION") }
+            }),
+        )?;
+        self.notify("notifications/initialized", json!({}))
+    }
+
+    fn notify(&self, method: &str, params: Value) -> Result<()> {
+        let mut conn = self.lock()?;
+        let payload = json!({ "jsonrpc": "2.0", "method": method, "params": params });
+        writeln!(conn.stdin, "{payload}")
+            .and_then(|()| conn.stdin.flush())
+            .with_context(|| {
+                format!(
+                    "failed to send '{method}' to MCP server '{}'",
+                    self.server_name
+                )
+            })
+    }
+
+    fn request(&self, method: &str, params: Value) -> Result<Value> {
+        let mut conn = self.lock()?;
+        let id = conn.next_id;
+        conn.next_id += 1;
+        let payload = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+        writeln!(conn.stdin, "{payload}")
+            .and_then(|()| conn.stdin.flush())
+            .with_context(|| {
+                format!(
+                    "failed to send '{method}' to MCP server '{}'",
+                    self.server_name
+                )
+            })?;
+
+        loop {
+            let mut line = String::new();
+            let read = conn.stdout.read_line(&mut line).with_context(|| {
+                format!("failed to read from MCP server '{}'", self.server_name)
+            })?;
+            if read == 0 {
+                bail!(
+                    "MCP server '{}' closed its stdout while awaiting '{method}'",
+                    self.server_name
+                );
+            }
+            let Ok(message) = serde_json::from_str::<Value>(line.trim()) else {
+                continue;
+            };
+            // Ignore notifications and responses to other in-flight requests.
+            if message.get("id").and_then(Value::as_u64) != Some(id) {
+                continue;
+            }
+            if let Some(err) = message.get("error") {
+                bail!(
+                    "MCP server '{}' returned an error for '{method}': {err}",
+                    self.server_name
+                );
+            }
+            return Ok(message.get("result").cloned().unwrap_or(Value::Null));
+        }
+    }
+
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, ChildRpcConnection>> {
+        self.conn.lock().map_err(|_| {
+            anyhow::anyhow!("MCP server '{}' connection is poisoned", self.server_name)
+        })
+    }
+}
+
+impl Drop for ChildProcessMcpClient {
+    fn drop(&mut self) {
+        if let Ok(mut conn) = self.conn.lock() {
+            let _ = conn.child.kill();
+            let _ = conn.child.wait();
+        }
+    }
+}
+
+impl McpManagedClient for ChildProcessMcpClient {
+    fn list_tools(&self) -> Result<Vec<McpToolDescriptor>> {
+        let result = self.request("tools/list", json!({}))?;
+        let entries = result
+            .get("tools")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        Ok(entries
+            .iter()
+            .filter_map(|entry| {
+                let tool_name = entry.get("name").and_then(Value::as_str)?.to_string();
+                Some(McpToolDescriptor {
+                    qualified_name: qualify_tool_name(&self.server_name, &tool_name),
+                    server_name: self.server_name.clone(),
+                    tool_name,
+                    description: entry
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                })
+            })
+            .collect())
+    }
+
+    fn call_tool(&self, tool_name: &str, arguments: Value) -> Result<Value> {
+        self.request(
+            "tools/call",
+            json!({ "name": tool_name, "arguments": arguments }),
+        )
+    }
+
+    fn list_resources(&self) -> Result<Vec<McpResourceDescriptor>> {
+        let result = self.request("resources/list", json!({}))?;
+        let entries = result
+            .get("resources")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        Ok(entries
+            .iter()
+            .filter_map(|entry| {
+                Some(McpResourceDescriptor {
+                    server_name: self.server_name.clone(),
+                    uri: entry.get("uri").and_then(Value::as_str)?.to_string(),
+                    description: entry
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                })
+            })
+            .collect())
+    }
+
+    fn read_resource(&self, uri: &str) -> Result<Value> {
+        self.request("resources/read", json!({ "uri": uri }))
     }
 }
 
@@ -685,16 +895,20 @@ fn build_stdio_state(initial_definitions: Vec<McpServerDefinition>) -> StdioMcpS
         let should_start = definition.config.enabled;
         definitions.insert(name.clone(), definition.clone());
         if should_start {
-            // A name collision means this server would shadow an already-registered one;
-            // keep it defined but not running rather than silently aliasing it.
-            let registered = manager
-                .register_server(
+            // A spawn failure or name collision means this server cannot serve real
+            // traffic; keep it defined but not running rather than aliasing it or
+            // answering on its behalf with fabricated results.
+            let registered = spawn_stdio_client(&definition.config).and_then(|client| {
+                manager.register_server(
                     definition.config.clone(),
                     definition.filter.clone(),
-                    default_stdio_client(&name),
+                    client,
                 )
-                .is_ok();
-            running.insert(name, registered);
+            });
+            if let Err(err) = &registered {
+                let _ = writeln!(std::io::stderr(), "mcp: server '{name}' not started: {err}");
+            }
+            running.insert(name, registered.is_ok());
         } else {
             running.insert(name, false);
         }
@@ -708,50 +922,13 @@ fn build_stdio_state(initial_definitions: Vec<McpServerDefinition>) -> StdioMcpS
     }
 }
 
-fn default_stdio_client(server_name: &str) -> Box<dyn McpManagedClient> {
-    let health_uri = format!("mcp://{server_name}/health");
-    let capabilities_uri = format!("mcp://{server_name}/capabilities");
-    Box::new(
-        InMemoryMcpClient::default()
-            .with_tool(
-                "health",
-                json!({
-                    "status": "ok",
-                    "server_name": server_name
-                }),
-            )
-            .with_tool(
-                "capabilities",
-                json!({
-                    "tools": ["health", "capabilities"],
-                    "resources": [health_uri.clone(), capabilities_uri.clone()]
-                }),
-            )
-            .with_resource(
-                &health_uri,
-                json!({
-                    "status": "ok",
-                    "server_name": server_name
-                }),
-            )
-            .with_resource(
-                &capabilities_uri,
-                json!({
-                    "server_name": server_name,
-                    "methods": [
-                        "tools/list",
-                        "tools/call",
-                        "resources/list",
-                        "resources/read",
-                        "server/list",
-                        "server/register",
-                        "server/start",
-                        "server/stop",
-                        "server/unregister"
-                    ]
-                }),
-            ),
-    )
+/// Build the client used to talk to a configured MCP server.
+///
+/// Always a real spawned child process: there is no stub fallback, so a
+/// misconfigured server fails loudly instead of answering with fabricated
+/// "ok" results.
+fn spawn_stdio_client(config: &McpServerConfig) -> Result<Box<dyn McpManagedClient>> {
+    Ok(Box::new(ChildProcessMcpClient::spawn(config)?))
 }
 
 fn default_rpc_methods() -> Vec<&'static str> {
@@ -943,7 +1120,8 @@ fn dispatch_stdio_request(
                     .register_server(
                         parsed.server.clone(),
                         parsed.filter.clone(),
-                        default_stdio_client(&name),
+                        spawn_stdio_client(&parsed.server)
+                            .map_err(|err| JsonRpcError::internal(err.to_string()))?,
                     )
                     .map_err(|err| JsonRpcError::invalid_params(err.to_string()))?;
             }
@@ -970,7 +1148,8 @@ fn dispatch_stdio_request(
                     .register_server(
                         definition.config.clone(),
                         definition.filter.clone(),
-                        default_stdio_client(&parsed.name),
+                        spawn_stdio_client(&definition.config)
+                            .map_err(|err| JsonRpcError::internal(err.to_string()))?,
                     )
                     .map_err(|err| JsonRpcError::invalid_params(err.to_string()))?;
                 state.running.insert(parsed.name, true);
@@ -1729,5 +1908,95 @@ mod tests {
         };
         let json = serde_json::to_value(&status).unwrap();
         assert_eq!(json["failed"]["error"], "oops");
+    }
+
+    #[cfg(unix)]
+    mod stdio_proxy {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+        use std::path::{Path, PathBuf};
+
+        /// A minimal but real MCP server: reads JSON-RPC lines on stdin and answers
+        /// with values that the stub client could never produce.
+        const FAKE_SERVER: &str = r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  [ -z "$id" ] && continue
+  case "$line" in
+    *'"initialize"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2024-11-05","capabilities":{}}}\n' "$id" ;;
+    *'"tools/list"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"spawned_echo","description":"real"}]}}\n' "$id" ;;
+    *'"tools/call"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"proof":"came-from-child","pid_env":"'"$CW_TEST_MARKER"'"}}\n' "$id" ;;
+    *'"resources/list"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"resources":[]}}\n' "$id" ;;
+    *) printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id" ;;
+  esac
+done
+"#;
+
+        fn write_fake_server(tag: &str) -> PathBuf {
+            let dir =
+                std::env::temp_dir().join(format!("cw-mcp-test-{tag}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("server.sh");
+            std::fs::write(&path, FAKE_SERVER).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        }
+
+        fn definition(path: &Path) -> McpServerDefinition {
+            McpServerDefinition {
+                config: McpServerConfig {
+                    name: "spawned".to_string(),
+                    command: path.to_string_lossy().to_string(),
+                    args: vec![],
+                    env: HashMap::from([(
+                        "CW_TEST_MARKER".to_string(),
+                        "env-was-passed".to_string(),
+                    )]),
+                    enabled: true,
+                },
+                filter: ToolFilter::default(),
+            }
+        }
+
+        #[test]
+        fn stdio_server_proxies_to_the_spawned_process_not_a_stub() {
+            let path = write_fake_server("proxy");
+            let state = build_stdio_state(vec![definition(&path)]);
+
+            let tools = state.manager.list_tools().unwrap();
+            let names: Vec<&str> = tools.iter().map(|t| t.tool_name.as_str()).collect();
+            assert_eq!(
+                names,
+                vec!["spawned_echo"],
+                "tools must come from the spawned process, not a hardcoded stub"
+            );
+            assert!(
+                !names.contains(&"health") && !names.contains(&"capabilities"),
+                "stub tools must not be advertised: {names:?}"
+            );
+
+            let result = state
+                .manager
+                .call_tool("spawned", "spawned_echo", json!({"x": 1}))
+                .unwrap();
+            assert_eq!(result["proof"], "came-from-child");
+            assert_eq!(
+                result["pid_env"], "env-was-passed",
+                "configured env must reach the spawned process"
+            );
+        }
+
+        #[test]
+        fn stdio_server_refuses_to_fake_a_server_it_cannot_spawn() {
+            let mut definition = definition(&write_fake_server("missing"));
+            definition.config.command = "/nonexistent/codewhale-mcp-test-binary".to_string();
+            let state = build_stdio_state(vec![definition]);
+
+            assert_eq!(state.running.get("spawned"), Some(&false));
+            assert!(
+                state.manager.list_tools().unwrap().is_empty(),
+                "an unspawnable server must expose no tools at all"
+            );
+        }
     }
 }

@@ -237,15 +237,28 @@ export function getTopic(id: string): DocTopic | undefined {
   return DOC_TOPICS.find((t) => t.id === id);
 }
 
-/** Group topics by category for sidebar rendering. */
-export function getTopicsByCategory(): Map<string, DocTopic[]> {
+/**
+ * Topics that are written as product pages on codewhale.net, grouped by
+ * category. These are the docs — what a reader came for.
+ */
+export function getGuideTopicsByCategory(): Map<string, DocTopic[]> {
   const map = new Map<string, DocTopic[]>();
   for (const t of DOC_TOPICS) {
+    if (!t.hasPage) continue;
     const group = map.get(t.category) ?? [];
     group.push(t);
     map.set(t.category, group);
   }
   return map;
+}
+
+/**
+ * Topics with no written page yet. They are still reachable, but they are
+ * repository reference material, not product documentation, and the index
+ * must present them as such rather than mixing them in with written pages.
+ */
+export function getReferenceTopics(): DocTopic[] {
+  return DOC_TOPICS.filter((t) => !t.hasPage);
 }
 
 /** Resolve a topic to its on-site route or canonical repository document. */

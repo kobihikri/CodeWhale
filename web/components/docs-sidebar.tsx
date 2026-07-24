@@ -5,8 +5,8 @@ import { usePathname } from "next/navigation";
 import { docsTopicIsCurrent } from "@/lib/docs-navigation";
 import {
   docTopicHref,
-  docTopicIsExternal,
-  getTopicsByCategory,
+  getGuideTopicsByCategory,
+  getReferenceTopics,
 } from "@/lib/docs-map";
 
 const CATEGORY_LABELS: Record<string, { en: string; zh: string }> = {
@@ -17,10 +17,16 @@ const CATEGORY_LABELS: Record<string, { en: string; zh: string }> = {
   operations: { en: "Operations", zh: "运维" },
 };
 
+const REPO_REFERENCE_LABEL = {
+  en: "Repository reference",
+  zh: "仓库参考文档",
+};
+
 export function DocsSidebar({ locale }: { locale: string }) {
   const isZh = locale === "zh";
   const pathname = usePathname();
-  const byCategory = getTopicsByCategory();
+  const byCategory = getGuideTopicsByCategory();
+  const referenceTopics = getReferenceTopics();
 
   return (
     <aside className="docs-sidebar min-w-0">
@@ -42,13 +48,10 @@ export function DocsSidebar({ locale }: { locale: string }) {
               <ul>
                 {topics.map((topic) => {
                   const isCurrent = docsTopicIsCurrent(topic, locale, pathname);
-                  const isExternal = docTopicIsExternal(topic);
                   return (
                     <li key={topic.id}>
                       <Link
                         href={docTopicHref(topic, locale)}
-                        target={isExternal ? "_blank" : undefined}
-                        rel={isExternal ? "noreferrer" : undefined}
                         aria-current={isCurrent ? "page" : undefined}
                         className={
                           isCurrent
@@ -57,7 +60,6 @@ export function DocsSidebar({ locale }: { locale: string }) {
                         }
                       >
                         <span>{isZh ? topic.label.zh : topic.label.en}</span>
-                        {isExternal && <span aria-hidden="true">↗</span>}
                       </Link>
                     </li>
                   );
@@ -65,6 +67,28 @@ export function DocsSidebar({ locale }: { locale: string }) {
               </ul>
             </div>
           ))}
+          {referenceTopics.length > 0 && (
+            <div className="docs-sidebar-group">
+              <div className="docs-sidebar-category">
+                {isZh ? REPO_REFERENCE_LABEL.zh : REPO_REFERENCE_LABEL.en}
+              </div>
+              <ul>
+                {referenceTopics.map((topic) => (
+                  <li key={topic.id}>
+                    <Link
+                      href={docTopicHref(topic, locale)}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="docs-sidebar-link"
+                    >
+                      <span>{isZh ? topic.label.zh : topic.label.en}</span>
+                      <span aria-hidden="true">↗</span>
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </nav>
       </div>
     </aside>

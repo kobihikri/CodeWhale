@@ -22,13 +22,10 @@ const CATEGORY_LABELS: Record<string, { en: string; zh: string }> = {
   operations: { en: "Operations & community", zh: "运维与社区" },
 };
 
-/* ------------------------------------------------------------------ */
-/*  Link / source helpers (mirrored from the original page.tsx)       */
-/* ------------------------------------------------------------------ */
-
-function topicSources(topic: DocTopic): string[] {
-  return Array.isArray(topic.repoSource) ? topic.repoSource : [topic.repoSource];
-}
+const REFERENCE_HEADING = {
+  en: "Not yet written up — repository reference",
+  zh: "尚未撰写 — 仓库参考文档",
+};
 
 /**
  * Build a single lowercase haystack string for fuzzy matching.
@@ -72,7 +69,6 @@ function TopicRow({
 }) {
   const isZh = locale === "zh";
   const href = docTopicHref(topic, locale);
-  const sources = topicSources(topic);
   const isExternal = docTopicIsExternal(topic);
 
   return (
@@ -90,14 +86,6 @@ function TopicRow({
         <p>
           {highlight(isZh ? topic.description.zh : topic.description.en, query)}
         </p>
-      </div>
-      <div className="docs-topic-source">
-        {sources.map((s, i) => (
-          <span key={s}>
-            {i > 0 && ", "}
-            {highlight(s, query)}
-          </span>
-        ))}
       </div>
       <span className="docs-topic-arrow" aria-hidden="true">{isExternal ? "↗" : "→"}</span>
     </Link>
@@ -123,16 +111,24 @@ export function DocsSearch({ locale }: { locale: string }) {
     return DOC_TOPICS.filter((_, i) => haystacks[i].includes(q));
   }, [query, haystacks]);
 
-  // Group filtered topics by category (preserve DOC_TOPICS order).
+  // Written pages group by category. Topics with no page are not product
+  // documentation — they are repo reference material and are listed apart,
+  // below, so the index reads as docs rather than as a source-file listing.
   const grouped = useMemo(() => {
     const map = new Map<string, DocTopic[]>();
     for (const t of filteredTopics) {
+      if (docTopicIsExternal(t)) continue;
       const group = map.get(t.category) ?? [];
       group.push(t);
       map.set(t.category, group);
     }
     return map;
   }, [filteredTopics]);
+
+  const referenceTopics = useMemo(
+    () => filteredTopics.filter(docTopicIsExternal),
+    [filteredTopics],
+  );
 
   // Keyboard shortcut: focus search on "/".
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
@@ -213,6 +209,19 @@ export function DocsSearch({ locale }: { locale: string }) {
               </div>
             </section>
           ))}
+          {referenceTopics.length > 0 && (
+            <section id="reference-docs" className="docs-result-group">
+              <div className="docs-result-heading">
+                <h2>{isZh ? REFERENCE_HEADING.zh : REFERENCE_HEADING.en}</h2>
+                <span>{referenceTopics.length}</span>
+              </div>
+              <div className="docs-topic-list">
+                {referenceTopics.map((t) => (
+                  <TopicRow key={t.id} topic={t} locale={locale} query={query} />
+                ))}
+              </div>
+            </section>
+          )}
         </div>
       ) : (
         <div className="docs-empty">
@@ -239,8 +248,8 @@ export function DocsSearch({ locale }: { locale: string }) {
         <section className="docs-source-note">
           <p>
             {isZh
-              ? "“网页”条目提供站内指南；“源文档”条目直接打开 GitHub 仓库中的完整参考资料。文档索引由仓库中的 docs-map.ts 注册表维护。"
-              : "Web guides stay on codewhale.net. Source docs open the complete reference in the GitHub repository. The index is maintained from the docs-map.ts registry in the repository."}
+              ? "上方各分类为站内撰写的文档页面。末尾一节列出尚未撰写成页面的主题，链接指向 GitHub 仓库中的参考文档。"
+              : "The categories above are pages written for readers on codewhale.net. The final section lists topics that do not have a written page yet; those links open reference documents in the GitHub repository."}
           </p>
         </section>
       )}

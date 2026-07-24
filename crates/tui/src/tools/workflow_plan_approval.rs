@@ -588,7 +588,18 @@ fn collect_children(
                 {
                     *network = true;
                 }
-                if matches!(name, "write_file" | "edit_file" | "apply_patch") {
+                // Must match the reference set in
+                // `tui::subagent_routing::is_file_mutation_tool`: the internal
+                // names AND the model-visible aliases. Listing only the three
+                // snake_case names made this card render "Writes: no" for a
+                // plan that writes via `fim_edit`, `Write`, or `Edit` — the
+                // same user-visible lie as #4730, on the TUI side of the crate
+                // boundary. `repo_law.rs` already carries a comment noting
+                // `fim_edit` was exactly this hole once before.
+                if matches!(
+                    name,
+                    "write_file" | "edit_file" | "apply_patch" | "fim_edit" | "Write" | "Edit"
+                ) {
                     *writes = true;
                 }
             }

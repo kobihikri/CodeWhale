@@ -95,12 +95,16 @@ pub const HANDOFF_RELATIVE_PATH: &str = ".codewhale/handoff.md";
 /// Legacy handoff path for reading from existing installs.
 const LEGACY_HANDOFF_RELATIVE_PATH: &str = ".deepseek/handoff.md";
 
-/// Per-file size cap for `instructions = [...]` entries (#454). Mirrors
-/// the existing project-context cap in `project_context::load_context_file`
-/// so a malicious / oversized include can't blow the prompt budget on
-/// its own. Files larger than this are truncated with an explicit `[…truncated: N bytes omitted]`
+/// Per-file size cap for `instructions = [...]` entries (#454). Files larger
+/// than this are truncated with an explicit `[…truncated: N bytes omitted]`
 /// marker rather than skipped entirely so the model still sees the head.
-const INSTRUCTIONS_FILE_MAX_BYTES: usize = 100 * 1024;
+///
+/// This *is* the project-context cap, not a copy of it. The comment used to
+/// claim it "mirrors" `project_context::load_context_file` while sitting at
+/// 100 KB against that module's 16 KB — a claim no test could falsify, so it
+/// silently stopped being true when 0.9.2 cut the context budget. Aliasing the
+/// constant makes the claim structural.
+const INSTRUCTIONS_FILE_MAX_BYTES: usize = crate::project_context::MAX_CONTEXT_SIZE;
 
 /// System prompt block appended when `translation_enabled` is true.
 /// Instructs the model to respond in the resolved session locale for all

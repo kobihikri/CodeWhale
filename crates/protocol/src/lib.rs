@@ -6,7 +6,6 @@ use serde_json::Value;
 pub mod agent_run;
 pub mod fleet;
 pub mod runtime;
-pub mod workroom;
 
 /// Common trait for lifecycle status enums across the protocol layer.
 ///

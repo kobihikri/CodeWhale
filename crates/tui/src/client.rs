@@ -5533,6 +5533,35 @@ mod tests {
             }
         }
 
+        // A tool result sitting in the MIDDLE of history is part of the wire
+        // prefix. Changing it busts the server's real prefix cache, so the
+        // diagnostic hash must move too. Before #3738's fix every role:"tool"
+        // message was classified Dynamic at any position and dropped from the
+        // hash, leaving this diagnostic blind to the most common way a tool
+        // loop busts the prefix. This test fails against that behaviour.
+        fn request_with_mid_history_tool_result(result: &str) -> MessageRequest {
+            let mut request = request_with_user_task("Same task");
+            request.messages.insert(
+                1,
+                Message {
+                    role: "tool".to_string(),
+                    content: vec![ContentBlock::Text {
+                        text: result.to_string(),
+                        cache_control: None,
+                    }],
+                },
+            );
+            request
+        }
+
+        let tool_a = inspect_prompt_for_request(&request_with_mid_history_tool_result("exit 0"));
+        let tool_b = inspect_prompt_for_request(&request_with_mid_history_tool_result("exit 1"));
+        assert_ne!(
+            tool_a.full_request_prefix_hash, tool_b.full_request_prefix_hash,
+            "a changed mid-history tool result busts the wire prefix, so the \
+             prefix hash must change with it"
+        );
+
         let first = inspect_prompt_for_request(&request_with_user_task("First task"));
         let second = inspect_prompt_for_request(&request_with_user_task("Second task"));
         let mut changed_history_request = request_with_user_task("Second task");

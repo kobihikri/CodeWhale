@@ -9910,11 +9910,16 @@ fn turn_metadata_includes_plan_mode_policy() {
         "got: {text}"
     );
     assert!(text.contains("##### Mode: Plan"), "got: {text}");
-    assert!(
-        text.contains("All writes, patches, shell commands,")
-            && text.contains("and code execution are blocked"),
-        "got: {text}"
-    );
+    // This used to also assert PLAN_MODE recited "All writes, patches, shell
+    // commands, and code execution are blocked". That sentence was deleted in
+    // 0.9.2: it described gates the runtime already enforces
+    // (authority.rs SandboxPolicy::ReadOnly / ShellPolicy::None,
+    // turn_loop.rs mode_blocks_command_execution / mode_blocks_write_capable_tool)
+    // for tools Plan mode strips from the roster before the model ever sees
+    // them. The restriction is covered by
+    // `turn_loop::tests::plan_blocks_write_capable_tools_without_narrowing_operate`,
+    // which fails if the gate regresses — where asserting the prose only ever
+    // proved the prompt still said so.
 }
 
 #[test]

@@ -50,9 +50,12 @@ use chrono::Utc;
 
 /// Maximum size of the user memory file. Larger files are loaded but the
 /// `<user_memory>` block carries a `<truncated bytes=N source="...">`
-/// marker so the user knows the model only saw a slice. Mirrors
-/// `project_context::MAX_CONTEXT_SIZE`.
-const MAX_MEMORY_SIZE: usize = 100 * 1024;
+/// marker so the user knows the model only saw a slice.
+///
+/// Aliases `project_context::MAX_CONTEXT_SIZE` rather than restating its
+/// value: the prose already claimed to mirror it while carrying 100 KB
+/// against that module's 16 KB.
+const MAX_MEMORY_SIZE: usize = crate::project_context::MAX_CONTEXT_SIZE;
 
 /// Read the user memory file at `path`, returning `None` when the file
 /// doesn't exist or is empty after trimming.

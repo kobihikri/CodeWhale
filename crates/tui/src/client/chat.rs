@@ -1294,7 +1294,17 @@ fn inspect_wire_request(tools: Option<&[Tool]>, messages: &[Value]) -> PromptIns
             .unwrap_or("unknown");
         let content = message_content_for_inspect(message);
         let is_last = index + 1 == messages.len();
-        let stability = if (is_last && role == "user") || role == "tool" {
+        // Only the final message is volatile. Everything before it is prefix,
+        // whatever its role.
+        //
+        // This used to also mark EVERY `role: "tool"` message Dynamic, at any
+        // position, which excluded them from `full_request_prefix_parts` and
+        // so from the prefix hash. On the wire those tool results sit in the
+        // middle of the prefix: changing one busts the server's real cache
+        // while `full_request_prefix_hash` stayed byte-identical. The
+        // diagnostic was blind to the single most common way a tool loop
+        // busts the prefix — the exact thing it exists to detect (#3738).
+        let stability = if is_last {
             PromptLayerStability::Dynamic
         } else {
             PromptLayerStability::History

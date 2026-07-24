@@ -845,7 +845,6 @@ version = "0.9.1"
 dependencies = [
  "anyhow",
  "axum",
- "clap",
  "codewhale-agent",
  "codewhale-config",
  "codewhale-core",
@@ -981,7 +980,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 2.0.18",
  "tracing",
  "uuid",
 ]

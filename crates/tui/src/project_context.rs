@@ -83,7 +83,7 @@ const GLOBAL_INSTRUCTIONS_LEGACY_PATH: &[&str] = &[".deepseek", "instructions.md
 /// 16 KB (#4781). The previous 100 KB ceiling was a "prevent absurdity" guard,
 /// not a budget: 100 KB of prose is ~25k tokens injected into every turn's
 /// stable prefix. 16 KB is ~4k tokens, which is already a long AGENTS.md.
-const MAX_CONTEXT_SIZE: usize = 16 * 1024; // 16 KB
+pub(crate) const MAX_CONTEXT_SIZE: usize = 16 * 1024; // 16 KB
 
 /// Maximum number of rule files loaded per rules directory.
 /// Prevents a project from silently injecting hundreds of rule files.

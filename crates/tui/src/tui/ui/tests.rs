@@ -11064,6 +11064,48 @@ fn prompt_override_notice_surfaces_in_transcript_and_toast() {
     );
 }
 
+/// #3928: an active Constitution override must be user-visible, not
+/// `tracing::info`-only.
+#[test]
+fn active_base_prompt_override_is_announced_in_transcript_and_toast() {
+    use crate::prompt_provenance::BasePromptProvenance;
+
+    let mut app = create_test_app();
+    surface_base_prompt_provenance(
+        &mut app,
+        BasePromptProvenance::ConfigDirOverride {
+            path: std::path::PathBuf::from("/cfg/prompts/constitution.md"),
+        },
+    );
+
+    assert!(
+        app.history.iter().any(|cell| matches!(
+            cell,
+            HistoryCell::System { content }
+                if content.contains("ACTIVE")
+                    && content.contains("/cfg/prompts/constitution.md")
+                    && content.contains("/constitution text")
+        )),
+        "expected active-override system cell, got {:?}",
+        app.history
+    );
+    let toast = app.status_toasts.back().expect("provenance toast");
+    assert_eq!(toast.level, StatusToastLevel::Info);
+    assert!(toast.text.contains("ACTIVE"));
+}
+
+/// The bundled default must stay silent — announcing it every launch is noise.
+#[test]
+fn bundled_base_prompt_is_not_announced() {
+    use crate::prompt_provenance::BasePromptProvenance;
+
+    let mut app = create_test_app();
+    let before = app.history.len();
+    surface_base_prompt_provenance(&mut app, BasePromptProvenance::Bundled);
+    assert_eq!(app.history.len(), before);
+    assert!(app.status_toasts.is_empty());
+}
+
 #[test]
 fn api_key_paste_shortcut_is_not_plain_text_input() {
     let ctrl_v = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL);

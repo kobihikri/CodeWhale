@@ -384,10 +384,19 @@ fn base_source_entries(model: &str, workspace: &Path, skills_dir: Option<&Path>)
     let mut builder = ReportBuilder::new();
 
     let constitution = crate::prompts::compose_default_static_layers(model);
+    // #3928: report where the Constitution actually came from instead of a
+    // hardcoded in-tree path that means nothing to a `cargo install` user, and
+    // that could not distinguish bundled from overridden.
+    let provenance = crate::prompt_provenance::current();
+    let constitution_label = if provenance.is_bundled_in_force() {
+        "Bundled constitution, language policy, and output policy"
+    } else {
+        "Custom constitution (override), language policy, and output policy"
+    };
     builder.push(SourceEntry::text(
         SourceKind::Constitution,
-        "Bundled constitution, language policy, and output policy",
-        Some("crates/tui/src/prompts/text.rs (BASE_PROMPT)".to_string()),
+        constitution_label,
+        Some(provenance.source_label()),
         ActivationReason::AlwaysOn,
         &constitution,
         CountingConfidence::High,
@@ -897,6 +906,34 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use tempfile::tempdir;
+
+    /// #3928: the Constitution source column used to be the hardcoded
+    /// in-tree path `crates/tui/src/prompts/text.rs (BASE_PROMPT)`, which is
+    /// meaningless to anyone who ran `cargo install` and could not tell
+    /// bundled from overridden.
+    #[test]
+    fn constitution_source_reports_provenance_not_a_repo_path() {
+        let dir = tempdir().expect("tempdir");
+        let builder = base_source_entries("deepseek-v4-pro", dir.path(), None);
+        let entry = builder
+            .entries
+            .iter()
+            .find(|entry| entry.source_kind == SourceKind::Constitution)
+            .expect("constitution entry");
+        let path = entry.source_path.as_deref().expect("source label");
+        assert!(
+            !path.contains("crates/tui/src/prompts"),
+            "source should not be an in-tree path, got {path}"
+        );
+        let provenance = crate::prompt_provenance::current();
+        assert_eq!(path, provenance.source_label());
+        if provenance.is_bundled_in_force() {
+            assert!(path.contains("bundled (compiled in)"));
+            assert!(entry.label.starts_with("Bundled constitution"));
+        } else {
+            assert!(entry.label.starts_with("Custom constitution"));
+        }
+    }
 
     #[test]
     fn context_report_json_contains_sources_and_tool_results() {

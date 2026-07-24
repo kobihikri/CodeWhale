@@ -63,7 +63,8 @@ On the **Constitution** step:
 - **`U`** (or `/constitution bundled`) records the bundled/default law.
 
 `/constitution` (alias `/law`) is the primary management surface once you are
-set up. Subcommands: `status` (the default), `preview`, `review`, `repo` (the
+set up. Subcommands: `status` (the default), `text` (the effective global
+Constitution in force, with its provenance), `preview`, `review`, `repo` (the
 repo-local law block), `explain`, `edit`/`guided`, `repair`, `posture`, and
 `bundled`. Managing the constitution never changes runtime approval, sandbox,
 shell, network, trust, default mode, or MCP authority — those stay in runtime
@@ -207,8 +208,18 @@ file alone is not enough:
 2. Set the explicit opt-in flag `CODEWHALE_ALLOW_BASE_PROMPT_OVERRIDE=1`
    (`true`/`on`/`yes` also accepted).
 
-If the file exists but the flag is unset, the override is **ignored** (with a
-log line pointing to the flag) and the bundled Constitution stays in place.
+If the file exists but the flag is unset, the override is **ignored** and the
+bundled Constitution stays in place — Codewhale says so on startup with a
+transcript entry and a warning toast, not just a log line (#3928).
+
+**Confirm which Constitution is actually in force with `/constitution text`.**
+It opens the *effective* base prompt in the pager with its provenance —
+`bundled (compiled in)`, the config-directory override path, or an embedder
+override installed by a host application. `/context` reports the same
+provenance in the Constitution source row, and when an override is active
+Codewhale announces it at startup. Never assume a custom Constitution is live
+because the file exists; read it back.
+
 This is intended for repurposing the TUI beyond software engineering — e.g.
 long-form writing or document review — where the engineering-oriented base
 prompt is a poor fit. It is loaded once at startup; a **missing or empty file

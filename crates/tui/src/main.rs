@@ -80,6 +80,7 @@ mod prefix_cache;
 mod pricing;
 mod project_context;
 mod project_context_cache;
+mod prompt_provenance;
 mod prompt_zones;
 mod prompts;
 mod provider_lake;

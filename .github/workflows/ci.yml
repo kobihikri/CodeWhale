@@ -494,6 +494,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          # check-ref-pinned-dispatch-inputs.py diffs against the merge base,
+          # so the shallow default clone is not enough.
+          fetch-depth: 0
       - name: Run actionlint
         uses: docker://rhysd/actionlint:1.7.12
         with:
@@ -502,6 +506,20 @@ jobs:
           # flag the long-standing `*.md` glob shadowing the PR-template
           # entry in change detection, which is intentional.
           args: -color -ignore SC2129 -ignore SC2221 -ignore SC2222
+      # actionlint validates syntax, expressions, and action refs. It has no
+      # concept of "this input can never be supplied", which is how #4801
+      # shipped a recovery input that was unusable on every existing tag.
+      - name: Check for unusable workflow_dispatch inputs
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [[ -n "${BASE_REF}" ]]; then
+            git fetch --no-tags origin "${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+            base="origin/${BASE_REF}"
+          else
+            base="HEAD~1"
+          fi
+          python3 scripts/check-ref-pinned-dispatch-inputs.py --base "${base}"
 
   # Check documentation builds without warnings
   docs:

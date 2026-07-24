@@ -398,6 +398,16 @@ If the workflow failed for the release tag, use the exact-tag rerun or
 
 ## Recovery and Rollback
 
+**Recovery paths live in a workflow dispatchable from the default branch.**
+Never add a recovery option as a `workflow_dispatch` input on `release.yml`.
+`workflow_dispatch` reads its input schema from the workflow file *at the ref
+being dispatched*, and `release.yml` requires that ref to be the tag — so a new
+input is only visible on tags cut after it lands, which excludes every tag that
+could ever need recovering. The symptom is
+`HTTP 422: Unexpected inputs provided`. A recovery workflow takes the tag as an
+*input* instead of as the dispatch ref. `scripts/check-ref-pinned-dispatch-inputs.py`
+enforces this in CI.
+
 - User-facing rollback:
   - npm: `npm install -g codewhale@X.Y.Z`
   - Cargo: `cargo install codewhale-cli --version X.Y.Z --locked --force`

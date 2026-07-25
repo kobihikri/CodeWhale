@@ -51,7 +51,7 @@ use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 pub use auth_source::{AuthSourceKind, ProviderAuthSourceToml};
 pub use codewhale_execpolicy::ToolAskRule;
 use codewhale_execpolicy::{ExecPolicyEngine, Ruleset};
@@ -2686,47 +2686,45 @@ fn sandbox_mode_rank(value: &str) -> Option<u8> {
 ///
 /// Checks `$WORKSPACE/.codewhale/config.toml` first, falling back to
 /// `$WORKSPACE/.deepseek/config.toml` for backward compatibility.
-/// Returns `None` if neither file exists or can't be parsed.
-pub fn load_project_config(workspace: &Path) -> Option<ConfigToml> {
+/// Returns `Ok(None)` if neither file exists. A file that exists but cannot be
+/// read or parsed is an `Err` so callers can tell "no project config" apart
+/// from "broken project config" and warn the user instead of silently falling
+/// back to the (possibly more permissive) user baseline.
+///
+/// The error message never includes file contents.
+pub fn load_project_config(workspace: &Path) -> Result<Option<ConfigToml>> {
     for dir in [CODEWHALE_APP_DIR, LEGACY_APP_DIR] {
         let path = workspace.join(dir).join(CONFIG_FILE_NAME);
         if !project_config_candidate_exists(&path) {
             continue;
         }
-        let raw = match read_checked_config_file(&path) {
-            Ok(raw) => raw,
-            Err(e) => {
-                tracing::warn!("Failed to read project config {}: {e:#}", path.display());
-                return None;
-            }
-        };
-        match toml::from_str::<ConfigToml>(&raw) {
-            Ok(config) => {
-                let raw_provider = toml::from_str::<toml::Value>(&raw)
-                    .ok()
-                    .and_then(|document| document.get("provider").cloned())
-                    .and_then(|provider| provider.as_str().map(str::to_string));
-                if config.provider == ProviderKind::Custom
-                    && raw_provider.as_deref() != Some(ProviderKind::Custom.as_str())
-                {
-                    tracing::warn!(
-                        "Failed to parse project config {}; file contents were omitted",
-                        quote_os_path(&path)
-                    );
-                    return None;
-                }
-                return Some(config);
-            }
-            Err(_) => {
-                tracing::warn!(
-                    "Failed to parse project config {}; file contents were omitted",
-                    quote_os_path(&path)
-                );
-                return None;
-            }
+        let raw = read_checked_config_file(&path).with_context(|| {
+            format!(
+                "Failed to read project config {}; project settings were ignored",
+                quote_os_path(&path)
+            )
+        })?;
+        let config = toml::from_str::<ConfigToml>(&raw).map_err(|_| {
+            anyhow!(
+                "Failed to parse project config {}; project settings were ignored (file contents omitted)",
+                quote_os_path(&path)
+            )
+        })?;
+        let raw_provider = toml::from_str::<toml::Value>(&raw)
+            .ok()
+            .and_then(|document| document.get("provider").cloned())
+            .and_then(|provider| provider.as_str().map(str::to_string));
+        if config.provider == ProviderKind::Custom
+            && raw_provider.as_deref() != Some(ProviderKind::Custom.as_str())
+        {
+            bail!(
+                "Project config {} names a provider that project overlays may not select; project settings were ignored",
+                quote_os_path(&path)
+            );
         }
+        return Ok(Some(config));
     }
-    None
+    Ok(None)
 }
 
 fn project_config_candidate_exists(path: &Path) -> bool {

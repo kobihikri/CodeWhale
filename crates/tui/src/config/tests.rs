@@ -9990,3 +9990,34 @@ fn picker_consent_persists_only_confirmed_exact_scope_and_revoke_is_one_step() {
         (0, 0, 0, 0, 0)
     );
 }
+
+#[test]
+fn malformed_project_config_queues_a_user_visible_notice() {
+    let _lock = lock_test_env();
+    crate::project_context::reset_context_notices_for_test();
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let config_dir = workspace.path().join(codewhale_config::CODEWHALE_APP_DIR);
+    fs::create_dir_all(&config_dir).expect("mkdir project config");
+    fs::write(
+        config_dir.join("config.toml"),
+        "sandbox_mode = \"read-only\"\nnot valid toml\n",
+    )
+    .expect("write malformed project config");
+
+    let loaded = load_project_config_or_notice(workspace.path());
+
+    assert!(loaded.is_none(), "malformed config must not load");
+    let notices = crate::project_context::take_context_notices();
+    assert!(
+        notices
+            .iter()
+            .any(|notice| notice.contains("Failed to parse project config")),
+        "a broken project config must reach the user, got {notices:?}"
+    );
+    assert!(
+        !notices
+            .iter()
+            .any(|notice| notice.contains("not valid toml")),
+        "notice must not leak file contents, got {notices:?}"
+    );
+}

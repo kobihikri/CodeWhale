@@ -12884,7 +12884,7 @@ async fn handle_skill_mutation_requested(
     };
 
     let workspace = app.workspace.clone();
-    let home = dirs::home_dir();
+    let home = crate::config::effective_home_dir();
     let cfg = crate::config::Config::load(None, None).unwrap_or_default();
     let network = cfg
         .network

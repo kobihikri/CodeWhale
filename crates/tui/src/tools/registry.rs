@@ -308,46 +308,6 @@ impl ToolRegistry {
             .collect()
     }
 
-    /// Get tools that require approval.
-    #[must_use]
-    #[allow(dead_code)]
-    pub fn approval_required_tools(&self) -> Vec<Arc<dyn ToolSpec>> {
-        self.tools
-            .values()
-            .filter(|t| t.approval_requirement() == ApprovalRequirement::Required)
-            .cloned()
-            .collect()
-    }
-
-    /// Get tools that suggest approval.
-    #[must_use]
-    #[allow(dead_code)]
-    pub fn approval_suggested_tools(&self) -> Vec<Arc<dyn ToolSpec>> {
-        self.tools
-            .values()
-            .filter(|t| {
-                matches!(
-                    t.approval_requirement(),
-                    ApprovalRequirement::Suggest | ApprovalRequirement::Required
-                )
-            })
-            .cloned()
-            .collect()
-    }
-
-    /// Update the context (e.g., when workspace changes).
-    #[allow(dead_code)]
-    pub fn set_context(&mut self, context: ToolContext) {
-        self.context = context;
-    }
-
-    /// Get a mutable reference to the current context.
-    #[must_use]
-    #[allow(dead_code)]
-    pub fn context_mut(&mut self) -> &mut ToolContext {
-        &mut self.context
-    }
-
     /// Remove a tool by name.
     #[must_use]
     #[allow(dead_code)]
@@ -1269,40 +1229,6 @@ impl ToolRegistryBuilder {
         }
 
         builder.with_notify_tool()
-    }
-
-    /// Legacy convenience wrapper for the full child-inherited Agent surface.
-    ///
-    /// New production callers should prefer [`Self::with_full_agent_surface_options`]
-    /// so feature/config-gated families (web, patch, memory, vision, etc.)
-    /// stay in parity with the parent Agent-mode registry.
-    ///
-    /// `allow_shell` mirrors the session's shell permission. `manager` and
-    /// `runtime` are the sub-agent runtime — children pass through their own
-    /// runtime so grandchildren can spawn within the same depth/cancellation
-    /// envelope.
-    #[must_use]
-    #[allow(dead_code)]
-    #[allow(clippy::too_many_arguments)]
-    pub fn with_full_agent_surface(
-        self,
-        client: Option<DeepSeekClient>,
-        model: String,
-        manager: super::subagent::SharedSubAgentManager,
-        runtime: super::subagent::SubAgentRuntime,
-        allow_shell: bool,
-        todo_list: super::todo::SharedTodoList,
-        plan_state: super::plan::SharedPlanState,
-    ) -> Self {
-        self.with_full_agent_surface_policy(
-            client,
-            model,
-            manager,
-            runtime,
-            crate::worker_profile::ShellPolicy::from_legacy_allow_shell(allow_shell),
-            todo_list,
-            plan_state,
-        )
     }
 
     /// Include the full child-inherited Agent surface under resolved

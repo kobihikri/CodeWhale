@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! System prompts for different modes.
 //!
 //! Prompts are assembled from composable layers loaded at compile time from
@@ -10,7 +9,7 @@
 //! single-file operation.
 
 use crate::models::{SystemBlock, SystemPrompt};
-use crate::project_context::{ProjectContext, load_project_context_with_parents};
+use crate::project_context::load_project_context_with_parents;
 use crate::tui::app::AppMode;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
@@ -420,14 +419,6 @@ pub use text::{
 // backward compatible). Intended to be set once at process start, before
 // any engine spawns; later sets return the rejected override string.
 static BASE_PROMPT_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-static LOCALE_PREAMBLE_ZH_HANS_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-static LOCALE_PREAMBLE_JA_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-static LOCALE_PREAMBLE_PT_BR_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-static LOCALE_PREAMBLE_VI_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-static LOCALE_CLOSER_ZH_HANS_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-static LOCALE_CLOSER_JA_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-static LOCALE_CLOSER_PT_BR_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-static LOCALE_CLOSER_VI_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 static STATIC_PROMPT_COMPOSER: std::sync::OnceLock<Box<StaticPromptComposer>> =
     std::sync::OnceLock::new();
 static PROMPT_OVERRIDE_NOTICES: LazyLock<Mutex<Vec<String>>> =
@@ -440,6 +431,8 @@ static PROMPT_OVERRIDE_NOTICES: LazyLock<Mutex<Vec<String>>> =
 /// Compaction Relay stay owned by Codewhale's system prompt assembly.
 #[non_exhaustive]
 #[derive(Debug)]
+// Embedder-facing payload: nothing in this workspace reads these fields.
+#[allow(dead_code)]
 pub struct StaticPromptCtx<'a> {
     /// Active model identifier after caller-side routing.
     pub model_id: &'a str,
@@ -459,49 +452,14 @@ pub fn set_base_prompt_override(s: String) -> Result<(), String> {
     set_prompt_override(&BASE_PROMPT_OVERRIDE, s)
 }
 
-/// Replace the Simplified-Chinese locale preamble (`## 语言要求`).
-pub fn set_locale_preamble_zh_hans_override(s: String) -> Result<(), String> {
-    set_prompt_override(&LOCALE_PREAMBLE_ZH_HANS_OVERRIDE, s)
-}
-
-/// Replace the Japanese locale preamble.
-pub fn set_locale_preamble_ja_override(s: String) -> Result<(), String> {
-    set_prompt_override(&LOCALE_PREAMBLE_JA_OVERRIDE, s)
-}
-
-/// Replace the Brazilian-Portuguese locale preamble.
-pub fn set_locale_preamble_pt_br_override(s: String) -> Result<(), String> {
-    set_prompt_override(&LOCALE_PREAMBLE_PT_BR_OVERRIDE, s)
-}
-
-/// Replace the Vietnamese locale preamble.
-pub fn set_locale_preamble_vi_override(s: String) -> Result<(), String> {
-    set_prompt_override(&LOCALE_PREAMBLE_VI_OVERRIDE, s)
-}
-
-/// Replace the Simplified-Chinese locale closer (`## 语言再次提醒`).
-pub fn set_locale_closer_zh_hans_override(s: String) -> Result<(), String> {
-    set_prompt_override(&LOCALE_CLOSER_ZH_HANS_OVERRIDE, s)
-}
-
-/// Replace the Japanese locale closer.
-pub fn set_locale_closer_ja_override(s: String) -> Result<(), String> {
-    set_prompt_override(&LOCALE_CLOSER_JA_OVERRIDE, s)
-}
-
-/// Replace the Brazilian-Portuguese locale closer.
-pub fn set_locale_closer_pt_br_override(s: String) -> Result<(), String> {
-    set_prompt_override(&LOCALE_CLOSER_PT_BR_OVERRIDE, s)
-}
-
-/// Replace the Vietnamese locale closer.
-pub fn set_locale_closer_vi_override(s: String) -> Result<(), String> {
-    set_prompt_override(&LOCALE_CLOSER_VI_OVERRIDE, s)
-}
-
 /// Replace the byte-stable base/personality prompt segment for subsequent
 /// prompt composition. First call wins; later calls return the rejected
 /// composer so embedders can preserve ownership.
+///
+/// Embedder-only entry point: nothing in this workspace calls it, so it
+/// carries the one narrow allow left after this file's module-wide
+/// dead-code allow was removed.
+#[allow(dead_code)]
 pub fn set_static_prompt_composer_override(
     f: Box<StaticPromptComposer>,
 ) -> Result<(), Box<StaticPromptComposer>> {
@@ -679,38 +637,6 @@ fn effective_static_prompt_composer() -> Option<&'static StaticPromptComposer> {
     STATIC_PROMPT_COMPOSER.get().map(Box::as_ref)
 }
 
-fn effective_locale_preamble_zh_hans() -> &'static str {
-    effective_prompt_override(&LOCALE_PREAMBLE_ZH_HANS_OVERRIDE, LOCALE_PREAMBLE_ZH_HANS)
-}
-
-fn effective_locale_preamble_ja() -> &'static str {
-    effective_prompt_override(&LOCALE_PREAMBLE_JA_OVERRIDE, LOCALE_PREAMBLE_JA)
-}
-
-fn effective_locale_preamble_pt_br() -> &'static str {
-    effective_prompt_override(&LOCALE_PREAMBLE_PT_BR_OVERRIDE, LOCALE_PREAMBLE_PT_BR)
-}
-
-fn effective_locale_preamble_vi() -> &'static str {
-    effective_prompt_override(&LOCALE_PREAMBLE_VI_OVERRIDE, LOCALE_PREAMBLE_VI)
-}
-
-fn effective_locale_closer_zh_hans() -> &'static str {
-    effective_prompt_override(&LOCALE_CLOSER_ZH_HANS_OVERRIDE, LOCALE_CLOSER_ZH_HANS)
-}
-
-fn effective_locale_closer_ja() -> &'static str {
-    effective_prompt_override(&LOCALE_CLOSER_JA_OVERRIDE, LOCALE_CLOSER_JA)
-}
-
-fn effective_locale_closer_pt_br() -> &'static str {
-    effective_prompt_override(&LOCALE_CLOSER_PT_BR_OVERRIDE, LOCALE_CLOSER_PT_BR)
-}
-
-fn effective_locale_closer_vi() -> &'static str {
-    effective_prompt_override(&LOCALE_CLOSER_VI_OVERRIDE, LOCALE_CLOSER_VI)
-}
-
 /// Optional locale-native reinforcement preamble prepended to the system
 /// prompt when the user's UI locale is non-English.
 ///
@@ -776,10 +702,10 @@ fn effective_locale_closer_vi() -> &'static str {
 /// and the closer position would all carry over unchanged.
 pub(crate) fn locale_reinforcement_preamble(locale_tag: &str) -> Option<&'static str> {
     match locale_tag {
-        "zh-Hans" | "zh-CN" | "zh" => Some(effective_locale_preamble_zh_hans()),
-        "ja" | "ja-JP" => Some(effective_locale_preamble_ja()),
-        "pt-BR" | "pt" => Some(effective_locale_preamble_pt_br()),
-        "vi" | "vi-VN" => Some(effective_locale_preamble_vi()),
+        "zh-Hans" | "zh-CN" | "zh" => Some(LOCALE_PREAMBLE_ZH_HANS),
+        "ja" | "ja-JP" => Some(LOCALE_PREAMBLE_JA),
+        "pt-BR" | "pt" => Some(LOCALE_PREAMBLE_PT_BR),
+        "vi" | "vi-VN" => Some(LOCALE_PREAMBLE_VI),
         _ => None,
     }
 }
@@ -802,10 +728,10 @@ pub(crate) fn locale_reinforcement_preamble(locale_tag: &str) -> Option<&'static
 /// behavior.
 pub(crate) fn locale_reinforcement_closer(locale_tag: &str) -> Option<&'static str> {
     match locale_tag {
-        "zh-Hans" | "zh-CN" | "zh" => Some(effective_locale_closer_zh_hans()),
-        "ja" | "ja-JP" => Some(effective_locale_closer_ja()),
-        "pt-BR" | "pt" => Some(effective_locale_closer_pt_br()),
-        "vi" | "vi-VN" => Some(effective_locale_closer_vi()),
+        "zh-Hans" | "zh-CN" | "zh" => Some(LOCALE_CLOSER_ZH_HANS),
+        "ja" | "ja-JP" => Some(LOCALE_CLOSER_JA),
+        "pt-BR" | "pt" => Some(LOCALE_CLOSER_PT_BR),
+        "vi" | "vi-VN" => Some(LOCALE_CLOSER_VI),
         _ => None,
     }
 }
@@ -891,14 +817,6 @@ dự án có là tiếng Anh, quá trình suy nghĩ của bạn cũng không đ�
 tích lũy trong ngữ cảnh. Trừ khi người dùng yêu cầu rõ ràng việc chuyển đổi (ví dụ \"think in English\"), \
 hãy tiếp tục suy nghĩ và trả lời bằng tiếng Việt.";
 
-/// Shell policy guidance for `allow_shell=false`. Referenced from the
-/// Runtime Policy Reference so the model can adapt without mutating the
-/// static system-prompt prefix (preserves DeepSeek prefix cache across
-/// shell-access toggles).
-pub const SHELL_POLICY_DISABLED: &str = "Shell tools unavailable. For mandatory-use items referencing \
-`exec_shell`, use `code_execution` (Python sandbox). For GitHub triage, use \
-`github_issue_context` / `github_pr_context` as primary route.";
-
 // ── Composition ───────────────────────────────────────────────────────
 
 /// Compose the full system prompt in deterministic order:
@@ -921,13 +839,17 @@ fn apply_model_template(
     prompt.replace("{model_id}", model_id)
 }
 
+#[allow(dead_code)] // exercised only by this file's tests; shipping binary does not call it
 const TOOL_TAXONOMY_DISCOVERY: &[&str] = &["File"];
+#[allow(dead_code)] // exercised only by this file's tests; shipping binary does not call it
 const TOOL_TAXONOMY_GIT: &[&str] = &["Git"];
+#[allow(dead_code)] // exercised only by this file's tests; shipping binary does not call it
 const TOOL_TAXONOMY_VERIFICATION: &[&str] = &["Run"];
 
 /// Return the core tool taxonomy body **without** a markdown heading.
 /// Suitable for embedding under a mode-specific sub-heading in the
 /// Runtime Policy Reference without producing a broken heading hierarchy.
+#[allow(dead_code)] // exercised only by this file's tests; shipping binary does not call it
 pub(crate) fn render_core_tool_taxonomy_body(mode: AppMode) -> String {
     let core_tools = core_taxonomy_tools_for_mode(mode);
     let mut sentences = Vec::new();
@@ -955,6 +877,7 @@ pub(crate) fn render_core_tool_taxonomy_body(mode: AppMode) -> String {
     sentences.join(" ")
 }
 
+#[allow(dead_code)] // exercised only by this file's tests; shipping binary does not call it
 fn core_taxonomy_tools_for_mode(mode: AppMode) -> Vec<&'static str> {
     let core_tools = crate::core::engine::default_active_native_tool_names();
     core_tools
@@ -964,6 +887,7 @@ fn core_taxonomy_tools_for_mode(mode: AppMode) -> Vec<&'static str> {
         .collect()
 }
 
+#[allow(dead_code)] // exercised only by this file's tests; shipping binary does not call it
 fn render_core_tool_group(group: &[&str], core_tools: &[&str]) -> Option<String> {
     let rendered = group
         .iter()
@@ -1005,10 +929,12 @@ fn question_discipline_block(approval_posture: Option<&str>) -> Option<String> {
     Some(format!("## Question Discipline\n\n{body}"))
 }
 
+#[allow(dead_code)] // exercised only by this file's tests; shipping binary does not call it
 pub fn compose_prompt() -> String {
     compose_prompt_with_approval_model_and_shell("codewhale")
 }
 
+#[allow(dead_code)] // exercised only by this file's tests; shipping binary does not call it
 pub(crate) fn compose_prompt_with_approval_model_and_shell(model_id: &str) -> String {
     let default_layers = compose_default_static_layers(model_id);
     apply_static_prompt_composer(
@@ -1058,6 +984,7 @@ fn apply_static_prompt_composer(
 // ── Public API ────────────────────────────────────────────────────────
 
 /// Get the system prompt for a specific mode with project context.
+#[allow(dead_code)] // exercised only by this file's tests; shipping binary does not call it
 pub fn system_prompt_for_mode_with_context(
     workspace: &Path,
     working_set_summary: Option<&str>,
@@ -1082,6 +1009,7 @@ pub fn system_prompt_for_mode_with_context(
 /// of the request. New blocks belong above the relay boundary unless they
 /// themselves are turn-volatile. Working-set metadata is now injected into the
 /// latest user message as per-turn metadata instead of this system prompt.
+#[allow(dead_code)] // exercised only by this file's tests; shipping binary does not call it
 pub fn system_prompt_for_mode_with_context_and_skills(
     workspace: &Path,
     working_set_summary: Option<&str>,
@@ -1366,6 +1294,7 @@ pub fn system_prompt_for_mode_with_context_skills_session_and_approval(
 
 /// Flatten a system prompt to joined text (tests + debug inspectors).
 #[must_use]
+#[allow(dead_code)] // exercised only by this file's tests; shipping binary does not call it
 pub fn system_prompt_flat_text(prompt: &SystemPrompt) -> String {
     match prompt {
         SystemPrompt::Text(text) => text.clone(),
@@ -1400,23 +1329,6 @@ fn render_route_fragment(session_context: &PromptSessionContext<'_>) -> String {
     )
 }
 
-/// Assemble a cache-stable constitution prefix with a typed WorldState layer.
-///
-/// This is the Codex-parity assembly point: constitution stays byte-stable for
-/// prefix caching; volatile concerns live in `WorldState` fragments with
-/// markers, caps, and `render_diff` retain-unchanged behavior. Callers that
-/// still need a flat string can use `WorldStateSnapshot::render_text`.
-pub fn system_prompt_with_world_state(
-    constitution: impl Into<String>,
-    world_state: crate::model_context::WorldState,
-) -> SystemPrompt {
-    let snapshot = crate::model_context::WorldStateSnapshot {
-        constitution: constitution.into(),
-        world_state,
-    };
-    SystemPrompt::Blocks(snapshot.to_system_blocks())
-}
-
 /// Build a WorldState from the common volatile session facts.
 ///
 /// Does not load constitution — callers keep that as the stable base.
@@ -1448,16 +1360,6 @@ pub fn world_state_from_session_facts(
         state = state.with_token_budget(body);
     }
     state
-}
-
-/// Build a system prompt with explicit project context
-pub fn build_system_prompt(base: &str, project_context: Option<&ProjectContext>) -> SystemPrompt {
-    let full_prompt =
-        match project_context.and_then(super::project_context::ProjectContext::as_system_block) {
-            Some(project_block) => format!("{}\n\n{}", base.trim(), project_block),
-            None => base.trim().to_string(),
-        };
-    SystemPrompt::Text(full_prompt)
 }
 
 #[cfg(test)]

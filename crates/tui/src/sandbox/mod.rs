@@ -55,15 +55,6 @@ use std::time::Duration;
 
 pub use policy::SandboxPolicy;
 
-/// Public OS-sandbox capability labels consumed by the website facts
-/// generator. Keep this list limited to wrappers that the command execution
-/// path can actually select and apply.
-#[allow(dead_code)] // Parsed from source by web/scripts/facts-lib.mjs.
-pub const PUBLIC_SANDBOX_BACKENDS: &[&str] = &[
-    "seatbelt (macOS, when available)",
-    "bubblewrap (Linux, opt-in when installed)",
-];
-
 /// Specification for a command to be executed, potentially within a sandbox.
 ///
 /// This struct captures all the information needed to execute a command:

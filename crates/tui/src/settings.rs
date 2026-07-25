@@ -1486,18 +1486,6 @@ impl Settings {
         settings.save()
     }
 
-    /// Load, update, and save a provider/model tuple as the global default
-    /// (the explicit "save as default" path).
-    #[allow(dead_code)] // wired to an explicit save-as-default action in a later UX pass (#3227).
-    pub fn persist_provider_model_selection_as_default(
-        provider: ApiProvider,
-        model: &str,
-    ) -> Result<()> {
-        let mut settings = Self::load()?;
-        settings.set_provider_model_selection(provider, model, true)?;
-        settings.save()
-    }
-
     /// Resolved boolean for whether the renderer should wrap each frame in
     /// DEC mode 2026 synchronized output. `auto` and `on` enable; `off`
     /// disables. The `auto` → `off` flip for known-bad terminals happens

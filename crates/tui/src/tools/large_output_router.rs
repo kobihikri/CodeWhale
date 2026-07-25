@@ -139,28 +139,6 @@ impl LargeOutputRouter {
         (routing, estimated_tokens, threshold)
     }
 
-    /// Build the synthesis prompt sent to the V4-Flash workshop sub-agent.
-    ///
-    /// The prompt is intentionally terse — Flash is a fast model and we just
-    /// want a faithful summary, not deep reasoning.
-    ///
-    /// This is the building block for the live LLM synthesis call wired in
-    /// the follow-up (once the async Flash client is safe to call from the
-    /// registry layer). The method is public so callers outside this crate
-    /// can unit-test the prompt shape.
-    #[must_use]
-    #[allow(dead_code)] // used by future Flash synthesis call; keep for API stability
-    pub fn synthesis_prompt(tool_name: &str, raw_output: &str, estimated_tokens: usize) -> String {
-        format!(
-            "You are a synthesis assistant. The tool `{tool_name}` produced {estimated_tokens} tokens \
-             of output that is too large to include directly in the parent context.\n\n\
-             Summarise the output below into a concise, faithful synthesis of ≤ 800 words. \
-             Preserve key facts, numbers, file paths, error messages, and any actionable \
-             information. Do NOT add commentary or interpretation beyond what is in the source.\n\n\
-             <raw_tool_output>\n{raw_output}\n</raw_tool_output>"
-        )
-    }
-
     /// Wrap a synthesis result with a workshop provenance header and a hint
     /// about the stored raw output.
     #[must_use]

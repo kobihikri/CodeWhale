@@ -760,26 +760,6 @@ pub fn discover_in_workspace_with_mode_and_plugins(
     discover_from_directories_with_plugins(skills_directories_for_mode(workspace, mode), plugins)
 }
 
-/// Discover skills from the workspace search set plus the configured install
-/// directory. Workspace-local directories keep their normal precedence; a
-/// custom configured directory is inserted before global defaults when it is
-/// outside that set so explicit configuration cannot be buried by large global
-/// libraries.
-#[must_use]
-#[allow(dead_code)]
-pub fn discover_for_workspace_and_dir(workspace: &Path, skills_dir: &Path) -> SkillRegistry {
-    discover_for_workspace_and_dir_with_mode(workspace, skills_dir, SkillDiscoveryMode::Compatible)
-}
-
-#[must_use]
-pub fn discover_for_workspace_and_dir_with_mode(
-    workspace: &Path,
-    skills_dir: &Path,
-    mode: SkillDiscoveryMode,
-) -> SkillRegistry {
-    discover_for_workspace_and_dir_with_mode_and_plugins(workspace, skills_dir, mode, None)
-}
-
 #[must_use]
 pub fn discover_for_workspace_and_dir_with_mode_and_plugins(
     workspace: &Path,

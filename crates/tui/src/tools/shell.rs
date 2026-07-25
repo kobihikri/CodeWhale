@@ -1067,25 +1067,6 @@ impl ShellManager {
         }
     }
 
-    /// Create a new `ShellManager` with a specific sandbox policy.
-    #[allow(dead_code)]
-    pub fn with_sandbox(workspace: PathBuf, policy: ExecutionSandboxPolicy) -> Self {
-        Self {
-            processes: HashMap::new(),
-            stale_jobs: HashMap::new(),
-            default_workspace: workspace,
-            sandbox_manager: SandboxManager::new(),
-            sandbox_policy: policy,
-            foreground_background_requested: false,
-        }
-    }
-
-    /// Set the sandbox policy for future commands.
-    #[allow(dead_code)]
-    pub fn set_sandbox_policy(&mut self, policy: ExecutionSandboxPolicy) {
-        self.sandbox_policy = policy;
-    }
-
     /// Get the current sandbox policy.
     #[allow(dead_code)]
     pub fn sandbox_policy(&self) -> &ExecutionSandboxPolicy {
@@ -1300,34 +1281,6 @@ impl ShellManager {
             }
             Self::execute_sync_sandboxed(command, &work_dir, timeout_ms, stdin_data, &exec_env)
         }
-    }
-
-    /// Execute a shell command interactively (stdin/stdout/stderr inherit from terminal).
-    #[allow(dead_code)]
-    pub fn execute_interactive(
-        &mut self,
-        command: &str,
-        working_dir: Option<&str>,
-        timeout_ms: u64,
-    ) -> Result<ShellResult> {
-        self.execute_interactive_with_policy(command, working_dir, timeout_ms, None)
-    }
-
-    /// Execute a shell command interactively with a specific sandbox policy override.
-    pub fn execute_interactive_with_policy(
-        &mut self,
-        command: &str,
-        working_dir: Option<&str>,
-        timeout_ms: u64,
-        policy_override: Option<ExecutionSandboxPolicy>,
-    ) -> Result<ShellResult> {
-        self.execute_interactive_with_policy_env(
-            command,
-            working_dir,
-            timeout_ms,
-            policy_override,
-            HashMap::new(),
-        )
     }
 
     /// Interactive variant that accepts extra env vars (#456 shell_env hook).

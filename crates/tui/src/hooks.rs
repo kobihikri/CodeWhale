@@ -275,11 +275,6 @@ impl HooksConfig {
         self.hooks.iter().filter(|h| h.event == event).collect()
     }
 
-    /// Check if hooks are configured and enabled
-    #[allow(dead_code)] // Public API for hook system consumers
-    pub fn has_hooks(&self) -> bool {
-        self.enabled && !self.hooks.is_empty()
-    }
 }
 
 fn workspace_allows_project_hooks(workspace: &Path) -> bool {
@@ -385,12 +380,6 @@ impl HookContext {
 
     pub fn with_tokens(mut self, tokens: u32) -> Self {
         self.total_tokens = Some(tokens);
-        self
-    }
-
-    #[allow(dead_code)] // Public builder API
-    pub fn with_cost(mut self, cost: f64) -> Self {
-        self.session_cost = Some(cost);
         self
     }
 

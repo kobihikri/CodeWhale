@@ -970,11 +970,6 @@ pub(crate) fn footer_balance_spans(app: &App) -> Vec<Span<'static>> {
     )]
 }
 
-#[allow(dead_code)] // positive-spend gate shared with billing chip helpers (TUI-DOG-010)
-pub(crate) fn should_show_footer_cost(displayed_cost: f64) -> bool {
-    displayed_cost.is_finite() && displayed_cost > 0.0
-}
-
 /// Session token-usage chip for the footer right cluster.
 ///
 /// Renders a compact accumulated token count for the current runtime session.

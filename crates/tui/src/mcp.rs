@@ -3628,22 +3628,6 @@ impl McpPool {
         Ok(())
     }
 
-    /// Get list of connected server names
-    #[allow(dead_code)] // Public API; the HTTP list endpoint no longer spawns a pool to call it (#3532)
-    pub fn connected_servers(&self) -> Vec<&str> {
-        self.connections
-            .iter()
-            .filter(|(_, c)| c.is_ready())
-            .map(|(n, _)| n.as_str())
-            .collect()
-    }
-
-    /// Disconnect all connections
-    #[allow(dead_code)] // Public API for MCP lifecycle management
-    pub fn disconnect_all(&mut self) {
-        self.drop_all_connections("disconnect all");
-    }
-
     /// Graceful shutdown of every connection in the pool: send SIGTERM to
     /// each stdio child and give them a short grace period before drop
     /// fires SIGKILL. Whalescale#420.

@@ -4907,15 +4907,6 @@ impl App {
         self.history.len() + self.active_cell.as_ref().map_or(0, ActiveCell::entry_count)
     }
 
-    /// The next cell index a freshly-pushed entry would occupy in the virtual
-    /// transcript. Used by `register_tool_cell`-style callsites that record
-    /// cell-index metadata before the active cell flushes to history.
-    #[must_use]
-    #[allow(dead_code)] // Reserved for the eventual merged push helper.
-    pub fn next_virtual_cell_index(&self) -> usize {
-        self.virtual_cell_count()
-    }
-
     #[must_use]
     pub fn original_cell_index_for_rendered(&self, rendered_index: usize) -> usize {
         self.collapsed_cell_map

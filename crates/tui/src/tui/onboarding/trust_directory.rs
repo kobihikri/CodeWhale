@@ -118,5 +118,8 @@ mod tests {
         assert!(body.contains("tools and hooks"));
         assert!(body.contains("1/Y"));
         assert!(body.contains("2/N/Esc"));
+        // #3926: the decline key no longer quits the app.
+        assert!(body.contains("continue without trusting"));
+        assert!(!body.contains("to quit"));
     }
 }

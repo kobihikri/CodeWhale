@@ -295,6 +295,21 @@ pub fn validate_api_key_for_onboarding(
     ApiKeyValidation::Accept { warning: None }
 }
 
+/// Leave the provider/key steps without activating any provider (#3927).
+///
+/// This is the provider-independent path: no `switch_provider`, no saved key,
+/// no route mutation. `onboarding_needs_api_key` deliberately stays true so
+/// `/setup`, Tips copy, and the #3985 feature-intro guard keep telling the
+/// truth about missing auth, and `offline_mode` makes submissions queue
+/// instead of erroring. Routes through the same trust/tips tail as a normal
+/// key submission, so the step counter cannot desync.
+pub fn skip_onboarding_provider_offline(app: &mut App) {
+    app.offline_mode = true;
+    app.api_key_input.clear();
+    app.api_key_cursor = 0;
+    advance_onboarding_after_api_key(app);
+}
+
 /// Welcome → Language transition. Clears the status message bar.
 pub fn advance_onboarding_from_welcome(app: &mut App) {
     app.status_message = None;

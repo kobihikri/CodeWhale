@@ -11032,6 +11032,96 @@ fn trust_completion_during_missing_key_recovery_advances_to_tips() {
 }
 
 #[test]
+fn declining_workspace_trust_keeps_the_session_alive_untrusted() {
+    // #3926: declining trust used to send Op::Shutdown — the most cautious
+    // answer got the user evicted to the shell. Declining must land in the
+    // rest of onboarding with trust withheld.
+    let tmpdir = TempDir::new().expect("workspace tempdir");
+    let mut app = create_test_app();
+    app.workspace = tmpdir.path().to_path_buf();
+    app.onboarding = OnboardingState::TrustDirectory;
+    app.onboarding_workspace_trust_gate = false;
+    app.onboarding_missing_key_recovery = false;
+    app.trust_mode = false;
+
+    decline_trust_directory_onboarding(&mut app);
+
+    assert_eq!(app.onboarding, OnboardingState::MentalModels);
+    assert!(!app.trust_mode, "declining must not grant trust");
+    assert!(
+        crate::tui::onboarding::needs_trust(&app.workspace),
+        "declining must not record trust on disk"
+    );
+    let toasts = app
+        .status_toasts
+        .iter()
+        .map(|toast| toast.text.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        toasts.contains("/trust on"),
+        "decline must name the way back, got: {toasts}"
+    );
+}
+
+#[test]
+fn declining_the_returning_user_trust_gate_opens_the_composer() {
+    // The standalone trust gate (already-onboarded user, new untrusted
+    // directory) must also stop being trust-or-quit.
+    let tmpdir = TempDir::new().expect("workspace tempdir");
+    let mut app = create_test_app();
+    app.workspace = tmpdir.path().to_path_buf();
+    app.onboarding = OnboardingState::TrustDirectory;
+    app.onboarding_workspace_trust_gate = true;
+    app.trust_mode = false;
+
+    decline_trust_directory_onboarding(&mut app);
+
+    assert_eq!(app.onboarding, OnboardingState::None);
+    assert!(!app.onboarding_workspace_trust_gate);
+    assert!(!app.trust_mode);
+}
+
+#[test]
+fn offline_skip_reaches_the_composer_without_activating_a_provider() {
+    // #3927: every path past Provider/ApiKey used to activate a provider.
+    let mut app = create_test_app();
+    app.onboarding = OnboardingState::ApiKey;
+    app.onboarding_needs_api_key = true;
+    app.onboarding_missing_key_recovery = false;
+    app.api_key_input = "half-typed-key".to_string();
+    app.api_key_cursor = 4;
+    app.trust_mode = true;
+    app.offline_mode = false;
+
+    crate::tui::onboarding::skip_onboarding_provider_offline(&mut app);
+
+    assert_eq!(app.onboarding, OnboardingState::MentalModels);
+    assert!(app.offline_mode, "skip must enter offline mode");
+    assert!(
+        app.onboarding_needs_api_key,
+        "skip must keep telling the truth about missing auth (#3985)"
+    );
+    assert!(app.api_key_input.is_empty());
+    assert_eq!(app.api_key_cursor, 0);
+}
+
+#[test]
+fn offline_skip_still_routes_through_the_trust_step() {
+    let tmpdir = TempDir::new().expect("workspace tempdir");
+    let mut app = create_test_app();
+    app.workspace = tmpdir.path().to_path_buf();
+    app.onboarding = OnboardingState::ApiKey;
+    app.onboarding_needs_api_key = true;
+    app.trust_mode = false;
+
+    crate::tui::onboarding::skip_onboarding_provider_offline(&mut app);
+
+    assert_eq!(app.onboarding, OnboardingState::TrustDirectory);
+    assert!(app.offline_mode);
+}
+
+#[test]
 fn prompt_override_notice_surfaces_in_transcript_and_toast() {
     let _lock = crate::test_support::lock_test_env();
     let _env = crate::test_support::EnvVarGuard::remove(prompts::BASE_PROMPT_OVERRIDE_OPT_IN_ENV);

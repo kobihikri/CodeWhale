@@ -413,6 +413,24 @@ mod tests {
     }
 
     #[test]
+    fn footer_names_offline_exploration_and_the_way_back() {
+        // #3927: skipping provider setup leaves a session that queues instead
+        // of sending. That state must be standing footer information, not a
+        // toast the user has already dismissed.
+        let mut app = create_test_app();
+        app.offline_mode = true;
+        app.onboarding_needs_api_key = true;
+        let (label, _) = footer_state_label(&app);
+        assert_eq!(label, "offline /provider");
+
+        // Activating a provider clears both flags; the chip must go with them.
+        app.offline_mode = false;
+        app.onboarding_needs_api_key = false;
+        let (label, _) = footer_state_label(&app);
+        assert_eq!(label, "idle");
+    }
+
+    #[test]
     fn production_footer_does_not_repeat_header_model_or_mode() {
         let app = create_test_app();
         let props = render_footer_from(&app, &app.status_items, None);
@@ -1192,6 +1210,13 @@ pub(crate) fn footer_state_label(app: &App) -> (&'static str, ratatui::style::Co
     // `app.paused` has been cleared but the hold is still resumable.
     if app.paused || app.paused_quarry.is_some() {
         return ("paused \u{23F8}", app.ui_theme.status_warning);
+    }
+
+    // Offline-without-auth is a persistent condition, not an event (#3927):
+    // a user who skipped provider setup during onboarding needs a standing
+    // reminder that names the way back, not just queue toasts.
+    if app.offline_mode && app.onboarding_needs_api_key {
+        return ("offline /provider", app.ui_theme.status_warning);
     }
 
     if app.queued_draft.is_some() {

@@ -797,6 +797,33 @@ fn complete_trust_directory_onboarding(app: &mut App, config: &Config) -> Result
     Ok(())
 }
 
+/// Decline workspace trust without ending the session (#3926).
+///
+/// Declining used to send `Op::Shutdown`: the most safety-conscious answer got
+/// the most hostile outcome (eviction to the shell). The app already models
+/// untrusted operation — `--skip-onboarding` launches run this way — so a
+/// decline now lands in the same restricted session and names `/trust on` as
+/// the way back. Trust is NOT recorded; `app.trust_mode` stays false.
+fn decline_trust_directory_onboarding(app: &mut App) {
+    app.trust_mode = false;
+    app.status_message = None;
+    app.push_status_toast(
+        "Continuing without trusting this workspace. Run /trust on to grant trust later."
+            .to_string(),
+        StatusToastLevel::Warning,
+        Some(8_000),
+    );
+    if app.onboarding_workspace_trust_gate {
+        app.onboarding_workspace_trust_gate = false;
+        app.onboarding = OnboardingState::None;
+    } else if app.onboarding_missing_key_recovery {
+        app.onboarding = OnboardingState::Tips;
+    } else {
+        app.onboarding = OnboardingState::MentalModels;
+    }
+    app.needs_redraw = true;
+}
+
 fn back_from_api_key_onboarding(app: &mut App) {
     app.onboarding = OnboardingState::Provider;
     app.api_key_input.clear();
@@ -4989,6 +5016,31 @@ async fn run_event_loop(
                 continue;
             }
 
+            // Provider-independent escape hatch (#3927). Onboarding used to
+            // have no way past the Provider/ApiKey steps that did not activate
+            // some provider; Ctrl+O reaches the composer offline instead.
+            // Checked before the picker routing below so it works whether the
+            // provider modal or the key screen is on screen.
+            if matches!(
+                app.onboarding,
+                OnboardingState::Provider | OnboardingState::ApiKey
+            ) && key.code == KeyCode::Char('o')
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+            {
+                if app.view_stack.top_kind() == Some(ModalKind::ProviderPicker) {
+                    app.view_stack.pop();
+                }
+                onboarding::skip_onboarding_provider_offline(app);
+                app.push_status_toast(
+                    "Exploring offline — no provider configured. Run /provider to connect one."
+                        .to_string(),
+                    StatusToastLevel::Warning,
+                    Some(8_000),
+                );
+                app.needs_redraw = true;
+                continue;
+            }
+
             // Provider onboarding is a real ProviderPickerView, not a
             // parallel ten-provider key handler. Route its keys before the
             // legacy onboarding switch so List/Key/Model/Confirm retain the
@@ -5173,7 +5225,7 @@ async fn run_event_loop(
                             // is it a silent dead key: point the user at the
                             // explicit keys the footer advertises.
                             app.status_message = Some(
-                                "Press 1 or Y to trust this workspace, or 2 or N to exit."
+                                "Press 1 or Y to trust this workspace, or 2 or N to continue without trusting."
                                     .to_string(),
                             );
                         }
@@ -5201,12 +5253,10 @@ async fn run_event_loop(
                     KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('2')
                         if app.onboarding == OnboardingState::TrustDirectory =>
                     {
-                        let _ = engine_handle.send(Op::Shutdown).await;
-                        return Ok(());
+                        decline_trust_directory_onboarding(app);
                     }
                     KeyCode::Esc if app.onboarding == OnboardingState::TrustDirectory => {
-                        let _ = engine_handle.send(Op::Shutdown).await;
-                        return Ok(());
+                        decline_trust_directory_onboarding(app);
                     }
                     KeyCode::Backspace if app.onboarding == OnboardingState::ApiKey => {
                         app.delete_api_key_char();

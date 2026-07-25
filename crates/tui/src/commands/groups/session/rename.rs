@@ -119,32 +119,12 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::session_manager::{SessionManager, create_saved_session_with_mode};
-    use crate::tui::app::{App, TuiOptions};
+    use crate::tui::app::App;
     use tempfile::TempDir;
 
     fn make_app(tmpdir: &TempDir) -> App {
         App::new(
-            TuiOptions {
-                model: "deepseek-v4-pro".to_string(),
-                workspace: tmpdir.path().to_path_buf(),
-                config_path: None,
-                config_profile: None,
-                allow_shell: false,
-                use_alt_screen: true,
-                use_mouse_capture: false,
-                use_bracketed_paste: true,
-                max_subagents: 1,
-                skills_dir: tmpdir.path().join("skills"),
-                memory_path: tmpdir.path().join("memory.md"),
-                notes_path: tmpdir.path().join("notes.txt"),
-                mcp_config_path: tmpdir.path().join("mcp.json"),
-                use_memory: false,
-                start_in_agent_mode: false,
-                skip_onboarding: true,
-                yolo: false,
-                resume_session_id: None,
-                initial_input: None,
-            },
+            crate::test_support::test_tui_options_in(tmpdir.path().to_path_buf()),
             &Config::default(),
         )
     }

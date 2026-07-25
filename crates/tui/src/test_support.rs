@@ -1,8 +1,64 @@
 //! Shared test-only helpers.
 
 use std::ffi::{OsStr, OsString};
+use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, OnceLock, TryLockError};
 use std::thread::ThreadId;
+
+use crate::tui::app::TuiOptions;
+
+/// The single `TuiOptions` literal in test code (#3923).
+///
+/// Every test fixture builds on this so adding a field to [`TuiOptions`]
+/// means editing `app.rs` and this function — not 80-odd copy-pasted
+/// literals that had already drifted apart on onboarding and start mode.
+///
+/// Path fields are derived from `workspace` the way the tempdir-based
+/// fixtures spelled them out by hand. Tests that ran against the bare
+/// relative-path fixture use [`test_tui_options`] instead, which keeps those
+/// paths exactly as they were rather than silently repointing a skills scan.
+///
+/// Intentional differences belong at the call site as struct-update syntax:
+/// `TuiOptions { max_subagents: 4, ..test_tui_options() }`.
+pub(crate) fn test_tui_options_in(workspace: impl Into<PathBuf>) -> TuiOptions {
+    let workspace = workspace.into();
+    TuiOptions {
+        model: "deepseek-v4-pro".to_string(),
+        config_path: None,
+        config_profile: None,
+        allow_shell: false,
+        use_alt_screen: true,
+        use_mouse_capture: false,
+        use_bracketed_paste: true,
+        max_subagents: 1,
+        skills_dir: workspace.join("skills"),
+        memory_path: workspace.join("memory.md"),
+        notes_path: workspace.join("notes.txt"),
+        mcp_config_path: workspace.join("mcp.json"),
+        use_memory: false,
+        start_in_agent_mode: false,
+        skip_onboarding: true,
+        yolo: false,
+        resume_session_id: None,
+        initial_input: None,
+        workspace,
+    }
+}
+
+/// [`test_tui_options_in`] for the relative-path (`.`) workspace fixture.
+///
+/// The auxiliary paths stay as the historical literals (`.`, `memory.md`, …)
+/// rather than `./skills` etc.: `skills_dir` feeds a real directory scan, so
+/// deriving it here would change what these tests discover.
+pub(crate) fn test_tui_options() -> TuiOptions {
+    TuiOptions {
+        skills_dir: PathBuf::from("."),
+        memory_path: PathBuf::from("memory.md"),
+        notes_path: PathBuf::from("notes.txt"),
+        mcp_config_path: PathBuf::from("mcp.json"),
+        ..test_tui_options_in(".")
+    }
+}
 
 /// Build a syntactically valid, non-secret JWT fixture without embedding a
 /// high-entropy token-shaped literal in Git history.

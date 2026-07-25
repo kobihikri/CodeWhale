@@ -304,8 +304,7 @@ mod tests {
         one_line_summary, render_footer_from,
     };
     use crate::config::Config;
-    use crate::tui::app::{App, TuiOptions};
-    use std::path::PathBuf;
+    use crate::tui::app::App;
 
     #[test]
     fn footer_working_label_frame_is_static_without_fancy_animations() {
@@ -338,27 +337,7 @@ mod tests {
     }
 
     fn create_test_app() -> App {
-        let options = TuiOptions {
-            model: "deepseek-v4-pro".to_string(),
-            workspace: PathBuf::from("."),
-            config_path: None,
-            config_profile: None,
-            allow_shell: false,
-            use_alt_screen: true,
-            use_mouse_capture: false,
-            use_bracketed_paste: true,
-            max_subagents: 1,
-            skills_dir: PathBuf::from("."),
-            memory_path: PathBuf::from("memory.md"),
-            notes_path: PathBuf::from("notes.txt"),
-            mcp_config_path: PathBuf::from("mcp.json"),
-            use_memory: false,
-            start_in_agent_mode: false,
-            skip_onboarding: true,
-            yolo: false,
-            resume_session_id: None,
-            initial_input: None,
-        };
+        let options = crate::test_support::test_tui_options();
         // Pin sidebar so dogfood machines with Agents-visible settings.toml
         // do not hide the footer agents chip this test asserts.
         let mut app = App::new(options, &Config::default());

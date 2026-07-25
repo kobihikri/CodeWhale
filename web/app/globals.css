@@ -1893,7 +1893,7 @@ a.body-link:hover { background-size: 100% 6px; color: var(--ink); }
 
 .docs-topic-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(8rem, 0.34fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 1.25rem;
   align-items: center;
   padding-block: 1rem;
@@ -1929,15 +1929,6 @@ a.body-link:hover { background-size: 100% 6px; color: var(--ink); }
   color: var(--ink-soft);
   font-size: 0.78rem;
   line-height: 1.55;
-}
-
-.docs-topic-source {
-  overflow: hidden;
-  color: var(--ink-mute);
-  font-family: var(--font-mono), "JetBrains Mono", monospace;
-  font-size: 0.62rem;
-  line-height: 1.5;
-  text-overflow: ellipsis;
 }
 
 .docs-topic-arrow {
@@ -1989,18 +1980,7 @@ a.body-link:hover { background-size: 100% 6px; color: var(--ink); }
 
 @media (max-width: 640px) {
   .docs-topic-row {
-    grid-template-columns: minmax(0, 1fr) auto;
     gap: 0.6rem 1rem;
-  }
-
-  .docs-topic-source {
-    grid-column: 1 / -1;
-    grid-row: 2;
-  }
-
-  .docs-topic-arrow {
-    grid-column: 2;
-    grid-row: 1;
   }
 }
 

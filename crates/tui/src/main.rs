@@ -8991,8 +8991,8 @@ async fn run_interactive(
     crate::models_dev_live::spawn_background_refresh();
     // Best-effort per-provider catalog refresh: fetches the active provider's
     // own /v1/models endpoint and merges live rows into the provider lake
-    // alongside the Models.dev snapshot. Currently active for TelecomJS, whose
-    // model list is not covered by the Models.dev catalog.
+    // alongside the Models.dev snapshot. Active for providers Models.dev does
+    // not cover — TelecomJS and user-registered custom endpoints (#4462).
     crate::client::DeepSeekClient::spawn_active_provider_catalog_refresh(config);
 
     // Boot janitors — snapshot prune (7-day default), spillover prune

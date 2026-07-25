@@ -9939,8 +9939,8 @@ async fn switch_provider(
     let engine_config = build_engine_config(app, config);
     *engine_handle = spawn_tui_engine(engine_config, config);
     // A successful in-session switch must refresh the same key-scoped live
-    // catalog as startup. TelecomJS is currently the only provider using this
-    // seam; failures preserve the existing/static rows.
+    // catalog as startup, for every provider Models.dev does not cover
+    // (TelecomJS, custom endpoints); failures preserve the existing rows.
     crate::client::DeepSeekClient::spawn_active_provider_catalog_refresh(config);
 
     if !app.api_messages.is_empty() {

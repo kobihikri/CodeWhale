@@ -1749,6 +1749,18 @@ impl DeepSeekClient {
         }
     }
 
+    /// Whether this provider serves its own authoritative model list that the
+    /// cross-provider Models.dev catalog does not cover (#4462).
+    ///
+    /// `Custom` is the important case: a user-registered endpoint has no
+    /// Models.dev rows and no bundled rows at all, so without a live
+    /// `/v1/models` refresh the picker can only ever show the single model
+    /// written in the config. TelecomJS ships its own roster for the same
+    /// reason.
+    fn provider_serves_own_catalog(provider: ApiProvider) -> bool {
+        matches!(provider, ApiProvider::Telecomjs | ApiProvider::Custom)
+    }
+
     /// Best-effort background refresh of the active provider's own `/v1/models`
     /// catalog, merging results into the provider lake (#3385).
     ///
@@ -1758,14 +1770,12 @@ impl DeepSeekClient {
     /// snapshot via [`provider_lake::merge_live_offerings`], preserving rows
     /// from other sources.
     ///
-    /// Currently activated for providers whose model list is not covered by the
-    /// Models.dev catalog (e.g. TelecomJS TokenHub). The refresh is non-fatal:
-    /// on failure, existing/bundled rows remain available.
+    /// Activated for providers whose model list is not covered by the
+    /// Models.dev catalog — TelecomJS TokenHub and user-registered custom
+    /// endpoints (#4462). The refresh is non-fatal: on failure,
+    /// existing/bundled rows remain available.
     pub fn spawn_active_provider_catalog_refresh(config: &Config) {
-        let provider = config.api_provider();
-        // Only refresh for providers that serve their own model list and are
-        // not already covered by the Models.dev catalog.
-        if !matches!(provider, ApiProvider::Telecomjs) {
+        if !Self::provider_serves_own_catalog(config.api_provider()) {
             return;
         }
 
@@ -6648,6 +6658,19 @@ mod tests {
         .expect("TelecomJS client")
     }
 
+    /// A user-registered custom endpoint pointed at a mock server (#4462).
+    fn custom_client_for(server: &MockServer) -> DeepSeekClient {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        DeepSeekClient::new(&Config {
+            provider: Some("custom".to_string()),
+            base_url: Some(format!("{}/v1", server.uri())),
+            default_text_model: Some("synthetic-configured-model".to_string()),
+            api_key: Some("test-key".to_string()),
+            ..Config::default()
+        })
+        .expect("custom client")
+    }
+
     async fn mount_models_json(server: &MockServer, status: u16, body: serde_json::Value) {
         Mock::given(method("GET"))
             .and(path("/v1/models"))
@@ -6824,6 +6847,59 @@ mod tests {
             .find(|offering| offering.wire_model_id == DEFAULT_TELECOMJS_MODEL)
             .expect("TelecomJS default row");
         assert!(default.default_for_provider);
+    }
+
+    /// #4462: a custom endpoint has no Models.dev rows and no bundled rows, so
+    /// if it is not in the per-provider refresh gate its live catalog is never
+    /// fetched in production and the picker shows only the configured model.
+    #[test]
+    fn custom_provider_is_gated_into_the_per_provider_catalog_refresh() {
+        assert!(
+            DeepSeekClient::provider_serves_own_catalog(ApiProvider::Custom),
+            "custom endpoints must be refreshed from their own /v1/models"
+        );
+        assert!(DeepSeekClient::provider_serves_own_catalog(
+            ApiProvider::Telecomjs
+        ));
+        assert!(
+            !DeepSeekClient::provider_serves_own_catalog(ApiProvider::Deepseek),
+            "Models.dev-covered providers must not double-refresh"
+        );
+    }
+
+    /// #4462: rows a custom endpoint reports carry only what it stated —
+    /// no price/capability metadata inherited from same-named home-provider
+    /// models.
+    #[tokio::test]
+    async fn custom_provider_delta_is_scoped_and_claims_no_unstated_facts() {
+        let server = MockServer::start().await;
+        mount_models_json(
+            &server,
+            200,
+            json!({"data": [
+                {"id": "synthetic-custom-one"},
+                {"id": "synthetic-custom-two"}
+            ]}),
+        )
+        .await;
+        let client = custom_client_for(&server);
+
+        let delta = client.fetch_catalog_delta().await.expect("custom delta");
+        assert_eq!(delta.provider, "custom");
+        let ids: Vec<&str> = delta
+            .offerings
+            .iter()
+            .map(|offering| offering.wire_model_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["synthetic-custom-one", "synthetic-custom-two"]);
+        for offering in &delta.offerings {
+            assert!(matches!(offering.source, CatalogSource::Live { .. }));
+            assert_eq!(offering.canonical_model, None);
+            assert_eq!(offering.cost, None);
+            assert_eq!(offering.limit, None);
+            assert!(offering.reasoning.is_none());
+            assert!(offering.tool_call.is_none());
+        }
     }
 
     #[tokio::test]

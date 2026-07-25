@@ -4975,7 +4975,11 @@ async fn run_event_loop(
                 if app.view_stack.top_kind() == Some(ModalKind::Help) {
                     app.view_stack.pop();
                 } else {
-                    let help = HelpView::new_for_shortcuts(app.ui_locale, &app.workspace);
+                    let help = HelpView::new_for_shortcuts(
+                        app.ui_locale,
+                        &app.workspace,
+                        &app.cached_skills,
+                    );
                     app.view_stack.push(help);
                 }
                 continue;

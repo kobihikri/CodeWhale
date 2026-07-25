@@ -38,7 +38,10 @@ impl RegisterCommand for HotbarCmd {
                  Hotbar slots dispatch only when no modal, inline picker, or \
                  onboarding surface owns input. Bare 1-8 insert text in the \
                  composer. Cmd-number and F-keys are not Hotbar shortcuts unless \
-                 a future release documents and implements them.",
+                 a future release documents and implements them. On macOS, \
+                 Terminal.app and iTerm2 only send Alt/Meta when \"Use Option as \
+                 Meta key\" is enabled; without it Option-1 types a composed \
+                 character instead. Ghostty and Kitty send it by default.",
             ),
             Some(other) => CommandResult::error(format!(
                 "Unknown /hotbar target '{other}'. Try `/hotbar`, `/hotbar off`, \

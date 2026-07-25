@@ -49,6 +49,18 @@ pub fn help(app: &mut App, topic: Option<&str>) -> CommandResult {
             }
             return CommandResult::message(help);
         }
+
+        // Skills are user-authored and dispatch by name (`$name` or
+        // `/skill name`), so `/help <skill>` must resolve them too — see #3912.
+        let skill_topic = topic.trim_start_matches(['$', '/']);
+        if let Some((name, description)) = app
+            .cached_skills
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(skill_topic))
+        {
+            return CommandResult::message(skill_help(app.ui_locale, name, description));
+        }
+
         return CommandResult::error(
             tr(app.ui_locale, MessageId::HelpUnknownCommand).replace("{topic}", topic),
         );
@@ -56,7 +68,7 @@ pub fn help(app: &mut App, topic: Option<&str>) -> CommandResult {
 
     // Show help overlay
     if app.view_stack.top_kind() != Some(ModalKind::Help) {
-        let help = HelpView::new_for_workspace(app.ui_locale, &app.workspace);
+        let help = HelpView::new_for_workspace(app.ui_locale, &app.workspace, &app.cached_skills);
         app.view_stack.push(help);
     }
     CommandResult::ok()
@@ -93,6 +105,22 @@ fn user_command_help(
             command.aliases.join(", ")
         );
     }
+    help
+}
+
+/// Help body for a discovered skill: both invocation shapes the dispatcher
+/// actually accepts (`$name` and `/skill name`).
+fn skill_help(locale: Locale, name: &str, description: &str) -> String {
+    let mut help = format!("${name}");
+    let description = description.trim();
+    if !description.is_empty() {
+        let _ = write!(help, "\n\n  {description}");
+    }
+    let _ = write!(
+        help,
+        "\n\n  {} ${name}  |  /skill {name}",
+        tr(locale, MessageId::HelpUsageLabel)
+    );
     help
 }
 
@@ -726,6 +754,33 @@ mod tests {
         assert!(result.message.is_some());
         assert!(result.message.unwrap().contains("Unknown command"));
         assert!(result.action.is_none());
+    }
+
+    /// #3912: skills execute (`$name` / `/skill name`) and autocomplete, but
+    /// `/help <skill>` reported "Unknown command" because the topic lookup only
+    /// consulted the built-in registry.
+    #[test]
+    fn help_topic_resolves_a_discovered_skill() {
+        let mut app = create_test_app();
+        app.cached_skills = vec![("dataviz".to_string(), "Chart design guidance".to_string())];
+
+        for topic in ["dataviz", "$dataviz", "DataViz"] {
+            let result = help(&mut app, Some(topic));
+            let msg = result
+                .message
+                .unwrap_or_else(|| panic!("/help {topic} should resolve the skill"));
+            assert!(
+                !msg.contains("Unknown command"),
+                "/help {topic} still reported unknown: {msg}"
+            );
+            assert!(msg.contains("Chart design guidance"), "{msg}");
+            assert!(msg.contains("$dataviz"), "{msg}");
+            assert!(msg.contains("/skill dataviz"), "{msg}");
+        }
+
+        // A genuinely unknown topic must still error.
+        let result = help(&mut app, Some("definitely-not-a-skill"));
+        assert!(result.message.unwrap().contains("Unknown command"));
     }
 
     #[test]

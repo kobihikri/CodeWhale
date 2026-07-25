@@ -17,6 +17,7 @@
 
 use std::borrow::Cow;
 use std::cell::RefCell;
+use std::fmt::Write;
 use std::path::Path;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -120,30 +121,39 @@ impl HelpView {
         Self::new_with_ordering(locale, HelpOrdering::CommandsFirst)
     }
 
-    pub fn new_for_workspace(locale: Locale, workspace: &Path) -> Self {
+    pub fn new_for_workspace(
+        locale: Locale,
+        workspace: &Path,
+        skills: &[(String, String)],
+    ) -> Self {
         commands::user_registry::with_registry_for_workspace(Some(workspace), |registry| {
-            Self::new_with_registry(locale, HelpOrdering::CommandsFirst, registry)
+            Self::new_with_registry(locale, HelpOrdering::CommandsFirst, registry, skills)
         })
     }
 
     /// Open Help as the keyboard reference promised by shell shortcut hints.
-    pub fn new_for_shortcuts(locale: Locale, workspace: &Path) -> Self {
+    pub fn new_for_shortcuts(
+        locale: Locale,
+        workspace: &Path,
+        skills: &[(String, String)],
+    ) -> Self {
         commands::user_registry::with_registry_for_workspace(Some(workspace), |registry| {
-            Self::new_with_registry(locale, HelpOrdering::KeybindingsFirst, registry)
+            Self::new_with_registry(locale, HelpOrdering::KeybindingsFirst, registry, skills)
         })
     }
 
     fn new_with_ordering(locale: Locale, ordering: HelpOrdering) -> Self {
         let registry = commands::user_registry::UserCommandRegistry::new();
-        Self::new_with_registry(locale, ordering, &registry)
+        Self::new_with_registry(locale, ordering, &registry, &[])
     }
 
     fn new_with_registry(
         locale: Locale,
         ordering: HelpOrdering,
         registry: &commands::user_registry::UserCommandRegistry,
+        skills: &[(String, String)],
     ) -> Self {
-        let entries = build_entries(locale, registry);
+        let entries = build_entries(locale, registry, skills);
         let mut view = Self {
             locale,
             ordering,
@@ -253,9 +263,33 @@ impl HelpView {
     }
 }
 
+/// Provenance tag rendered ahead of a non-built-in description so a row says
+/// where it came from. Descriptions for these rows are authored by the user
+/// (command frontmatter / skill metadata) and are never localized, so the tag
+/// stays ASCII rather than pretending to be translated copy.
+const USER_COMMAND_TAG: &str = "[user]";
+const SKILL_TAG: &str = "[skill]";
+
+fn push_entry(entries: &mut Vec<HelpEntry>, label: String, description: String, extra: &str) {
+    let haystack = format!(
+        "{} {} {}",
+        label.to_ascii_lowercase(),
+        description.to_ascii_lowercase(),
+        extra.to_ascii_lowercase()
+    );
+    entries.push(HelpEntry {
+        section: HelpSection::Command,
+        sub_rank: 0,
+        label,
+        description,
+        haystack,
+    });
+}
+
 fn build_entries(
     locale: Locale,
     registry: &commands::user_registry::UserCommandRegistry,
+    skills: &[(String, String)],
 ) -> Vec<HelpEntry> {
     let mut entries = Vec::new();
 
@@ -322,6 +356,50 @@ fn build_entries(
             description,
             haystack,
         });
+    }
+
+    // #3912: user markdown commands execute and autocomplete, so Help must
+    // advertise them too. `hidden: true` stays out of the discovery surface.
+    for command in registry.iter().filter(|command| !command.hidden) {
+        let label = format!("/{}", command.name);
+        let mut description = String::from(USER_COMMAND_TAG);
+        if let Some(text) = command
+            .description
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            description.push(' ');
+            description.push_str(text);
+        }
+        if !command.aliases.is_empty() {
+            let _ = write!(
+                description,
+                "  (aliases: {})",
+                command
+                    .aliases
+                    .iter()
+                    .map(|a| format!("/{a}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        let usage = command.display_usage().unwrap_or_default();
+        push_entry(&mut entries, label, description, usage);
+    }
+
+    // #3912: skills dispatch as `$name` or `/skill name`; advertise both so the
+    // filter finds them by either shape.
+    for (name, skill_description) in skills {
+        let label = format!("/skill {name}");
+        let mut description = String::from(SKILL_TAG);
+        let trimmed = skill_description.trim();
+        if !trimmed.is_empty() {
+            description.push(' ');
+            description.push_str(trimmed);
+        }
+        let _ = write!(description, "  (or ${name})");
+        push_entry(&mut entries, label, description, &format!("${name}"));
     }
 
     entries
@@ -599,6 +677,82 @@ mod tests {
         .section
     }
 
+    /// #3912: user markdown commands executed and autocompleted, but Help only
+    /// ever used the registry to *suppress* shadowed built-ins — it never
+    /// advertised the user's own commands, so they were invisible in help.
+    #[test]
+    fn help_overlay_lists_user_commands_and_hides_hidden_ones() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let commands_dir = tmp.path().join(".codewhale").join("commands");
+        std::fs::create_dir_all(&commands_dir).unwrap();
+        std::fs::write(
+            commands_dir.join("shipit.md"),
+            "---\ndescription: Cut a release candidate\nargument-hint: /shipit <tag>\n---\nship it",
+        )
+        .unwrap();
+        std::fs::write(
+            commands_dir.join("internal-only.md"),
+            "---\ndescription: Not for humans\nhidden: true\n---\ninternal",
+        )
+        .unwrap();
+
+        let mut view = HelpView::new_for_workspace(Locale::En, tmp.path(), &[]);
+        let shipit = view
+            .entries
+            .iter()
+            .find(|entry| entry.label == "/shipit")
+            .expect("user command should be advertised in the help overlay");
+        assert!(shipit.description.contains("Cut a release candidate"));
+        assert!(
+            shipit.description.contains(USER_COMMAND_TAG),
+            "user rows must show provenance: {:?}",
+            shipit.description
+        );
+        assert!(
+            view.entries.iter().all(|e| e.label != "/internal-only"),
+            "hidden user commands must stay out of help"
+        );
+
+        // Reachable through the same substring filter as everything else.
+        type_filter(&mut view, "shipit");
+        assert!(
+            view.filtered
+                .iter()
+                .any(|idx| view.entries[*idx].label == "/shipit")
+        );
+    }
+
+    /// #3912: skills dispatch via `$name` / `/skill name` and autocomplete in
+    /// the slash popup, but the overlay never saw `cached_skills` at all.
+    #[test]
+    fn help_overlay_lists_skills_with_both_invocation_shapes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let skills = vec![("dataviz".to_string(), "Chart design guidance".to_string())];
+
+        let mut view = HelpView::new_for_workspace(Locale::En, tmp.path(), &skills);
+        let entry = view
+            .entries
+            .iter()
+            .find(|entry| entry.label == "/skill dataviz")
+            .expect("cached skills should be advertised in the help overlay");
+        assert!(entry.description.contains("Chart design guidance"));
+        assert!(entry.description.contains(SKILL_TAG));
+        assert!(
+            entry.description.contains("$dataviz"),
+            "skill row must document the `$name` shape too: {:?}",
+            entry.description
+        );
+
+        // Findable by the `$name` shape as well as the `/skill` shape.
+        type_filter(&mut view, "$dataviz");
+        assert!(
+            view.filtered
+                .iter()
+                .any(|idx| view.entries[*idx].label == "/skill dataviz"),
+            "`$dataviz` filter should find the skill row"
+        );
+    }
+
     #[test]
     fn empty_filter_lists_all_entries() {
         let view = HelpView::new();
@@ -636,10 +790,13 @@ mod tests {
         .unwrap();
 
         for (term, mut view) in [
-            ("slop", HelpView::new_for_workspace(Locale::En, tmp.path())),
+            (
+                "slop",
+                HelpView::new_for_workspace(Locale::En, tmp.path(), &[]),
+            ),
             (
                 "canzha",
-                HelpView::new_for_shortcuts(Locale::En, tmp.path()),
+                HelpView::new_for_shortcuts(Locale::En, tmp.path(), &[]),
             ),
         ] {
             let debt = view
@@ -666,9 +823,25 @@ mod tests {
             "debt".to_string(),
             "---\ndescription: Custom debt\n---\ncustom debt".to_string(),
         )]);
-        let entries = build_entries(Locale::En, &registry);
+        let entries = build_entries(Locale::En, &registry, &[]);
 
-        assert!(entries.iter().all(|entry| entry.label != "/debt"));
+        // Since #3912 the user's own `/debt` *is* advertised — what must not
+        // survive is the built-in's copy, which would teach the wrong command.
+        let debt = entries
+            .iter()
+            .filter(|entry| entry.label == "/debt")
+            .collect::<Vec<_>>();
+        assert_eq!(debt.len(), 1, "exactly one /debt row should survive");
+        assert!(
+            debt[0].description.starts_with(USER_COMMAND_TAG),
+            "the surviving /debt row must be the user's: {:?}",
+            debt[0].description
+        );
+        assert!(debt[0].description.contains("Custom debt"));
+        assert!(
+            !debt[0].description.contains("/cleanup"),
+            "built-in /debt alias copy leaked into the user row"
+        );
     }
 
     #[test]
@@ -981,7 +1154,7 @@ mod tests {
     #[test]
     fn localized_help_keybinding_descriptions_use_zh_hans() {
         let registry = commands::user_registry::UserCommandRegistry::new();
-        let entries = build_entries(Locale::ZhHans, &registry);
+        let entries = build_entries(Locale::ZhHans, &registry, &[]);
         let kb_entries: Vec<_> = entries
             .iter()
             .filter(|e| e.section == HelpSection::Keybinding)

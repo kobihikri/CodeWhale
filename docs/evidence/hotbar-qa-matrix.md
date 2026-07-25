@@ -49,6 +49,29 @@ coverage.
 | Unknown action | Unknown configured action is visible and does not dispatch. | `crates/tui/src/tui/sidebar.rs::hotbar_panel_slots_handle_empty_partial_and_unknown_config`; `crates/tui/src/tui/ui.rs::dispatch_hotbar_slot` |
 | Approval-gated/deferred source | Source is explicitly deferred and must not register bindable actions before gates exist. | `crates/tui/src/tui/hotbar/actions.rs::source_descriptors_cover_dispatch_boundaries`; `crates/tui/src/tui/hotbar/actions.rs::deferred_sources_cannot_register_dispatchable_actions` |
 
+## Terminal Alt-Delivery Matrix (#3758)
+
+Hotbar dispatch requires the terminal to actually deliver `Alt`/`Meta` with the
+digit. That is a terminal setting, not app behavior, so record it per terminal.
+`hotbar_slot_from_key` (`crates/tui/src/tui/ui.rs`) requires plain `ALT` and
+rejects `ALT|CONTROL` (which is how AltGr arrives) and `ALT|SUPER`, so non-US
+layouts keep normal text entry.
+
+| Terminal / OS | Setting required | Expected `Alt-1`..`Alt-8` | Notes |
+| --- | --- | --- | --- |
+| macOS Terminal.app | Profiles → Keyboard → "Use Option as Meta key" | Dispatch | Without it, Option-1 types `¡` into the composer; nothing dispatches. |
+| macOS iTerm2 | Profiles → Keys → Left/Right Option = `Esc+` | Dispatch | With "Normal", Option-digit emits the composed character instead. |
+| Ghostty (macOS/Linux) | Default (`macos-option-as-alt` on by default) | Dispatch | No configuration needed. |
+| Kitty (macOS/Linux) | Default (`macos_option_as_alt yes` on macOS) | Dispatch | Kitty keyboard protocol negotiated as `DISAMBIGUATE_ESCAPE_CODES` only; key *release* events are filtered in `ui.rs`, so no double dispatch. |
+| Any terminal, AltGr layout | n/a | No dispatch | AltGr arrives as `Ctrl+Alt`; the digit inserts as text. |
+| Any terminal, `Cmd`/`Super`+digit | n/a | No dispatch | Reserved by terminal tab switching; never advertised as a Hotbar chord. |
+| Any terminal, `F1` | n/a | Opens Help | Hotbar never claims F-keys. |
+| Hotbar hidden (`hotbar = []`, the #3807 default) | n/a | No dispatch, no visible chord surface | `/hotbar on` restores the default slots. |
+
+Manual results are recorded per release candidate; unit coverage for the parse
+contract lives in `crates/tui/src/tui/ui/tests.rs` (`hotbar_alt_digit_*`,
+`hotbar_bare_digit_*`, `hotbar_digits_are_blocked_*`).
+
 ## Release Smoke Checklist
 
 Run before claiming Hotbar MVP readiness:

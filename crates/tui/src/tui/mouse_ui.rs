@@ -1414,7 +1414,8 @@ pub(crate) fn handle_context_menu_action(app: &mut App, action: ContextMenuActio
             open_context_inspector(app);
         }
         ContextMenuAction::OpenHelp => {
-            let help = HelpView::new_for_workspace(app.ui_locale, &app.workspace);
+            let help =
+                HelpView::new_for_workspace(app.ui_locale, &app.workspace, &app.cached_skills);
             app.view_stack.push(help);
         }
         ContextMenuAction::OpenFileAtLine { cell_index } => {

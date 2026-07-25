@@ -92,7 +92,7 @@ impl PrefixFingerprint {
             Some(tools) if !tools.is_empty() => {
                 // `fingerprint_for` consults the cache first; on a hit
                 // it returns the pre-computed hex digest directly.
-                cache.fingerprint_for(tools).sha256_hex
+                cache.fingerprint_for(tools).to_string()
             }
             _ => sha256_hex(b""),
         };
@@ -190,37 +190,19 @@ pub struct PrefixStabilityManager {
 /// "session + 1 or 2 forked subagent catalogs" without unbounded growth.
 const TOOL_CATALOG_CACHE_CAPACITY: usize = 8;
 
-/// Bounded LRU cache of `(tool_set_identity) -> (sha256_hex, joined_string)`.
+/// Bounded LRU cache of `tool_set_identity -> sha256_hex`.
 ///
 /// The cache key is a content-derived `u64` hash of the tool list (length +
 /// per-tool `name` + `description` + serialized `input_schema`). On a hit,
 /// `PrefixFingerprint::compute` skips the per-tool JSON serialization, the
 /// sort, and the join — a workload that can be 100+ microseconds for a
-/// 60-tool catalog. On a miss, the work runs once and the result is stored.
-///
-/// The cache is intentionally *not* generic over `PrefixFingerprint` because
-/// only the joined string is large; the SHA-256 is recomputed from the cached
-/// joined string when the catalog changes (cheap, ≤ a few hundred bytes).
+/// 60-tool catalog. On a miss, the work runs once and only the resulting
+/// digest is stored; the joined catalog itself is dropped immediately.
 #[derive(Debug, Default, Clone)]
 pub struct ToolCatalogCache {
-    by_identity: HashMap<u64, CachedCatalog>,
+    by_identity: HashMap<u64, Arc<str>>,
     insertion_order: VecDeque<u64>,
     capacity: usize,
-}
-
-/// One entry in [`ToolCatalogCache`]. Stores the joined JSON catalog plus
-/// the pre-computed SHA-256 hex digest so `PrefixFingerprint::compute`
-/// does not need to re-hash on the hot path.
-#[derive(Debug, Clone)]
-pub struct CachedCatalog {
-    /// The newline-joined, sorted tool-catalog JSON. Wrapped in an `Arc` so
-    /// multiple cache consumers can hold the same allocation. Exposed for
-    /// observability (debug builds, `/status` chip) and for tests that
-    /// need to assert byte-stability of the joined catalog.
-    #[allow(dead_code)] // observability + tests; not consumed on the hot path
-    pub joined: Arc<String>,
-    /// SHA-256 hex digest of `joined`, computed once on cache miss.
-    pub sha256_hex: String,
 }
 
 impl ToolCatalogCache {
@@ -242,34 +224,32 @@ impl ToolCatalogCache {
         }
     }
 
-    /// Compute (or recall) the joined-and-hashed tool catalog for `tools`.
-    /// The cache is keyed on a content-derived `u64` identity so two `&[Tool]`
-    /// slices with the same payloads — in the same order — hit the same entry.
-    pub fn fingerprint_for(&mut self, tools: &[Tool]) -> CachedCatalog {
+    /// Compute (or recall) the SHA-256 hex digest of the sorted, joined tool
+    /// catalog for `tools`. The cache is keyed on a content-derived `u64`
+    /// identity so two `&[Tool]` slices with the same payloads — in the same
+    /// order — hit the same entry.
+    ///
+    /// The returned `Arc<str>` is cloned from the stored entry on a hit, so
+    /// `Arc::ptr_eq` on two results is an observable proof of a cache hit.
+    pub fn fingerprint_for(&mut self, tools: &[Tool]) -> Arc<str> {
         let identity = tool_set_identity(tools);
         if let Some(cached) = self.by_identity.get(&identity) {
-            // Hit: clone the `Arc` so the caller can hold the joined string
-            // without keeping a reference to the cache.
-            return cached.clone();
+            return Arc::clone(cached);
         }
 
-        // Miss: serialize, sort, join, hash. Store the joined string in an
-        // `Arc` so a later hit can return the same allocation.
+        // Miss: serialize, sort, join, hash. The joined string is a local —
+        // only the digest is retained.
         let mut serialized: Vec<String> = tools.iter().filter_map(tool_to_api_json).collect();
         serialized.sort();
-        let joined = Arc::new(serialized.join("\n"));
-        let sha256_hex = sha256_hex(joined.as_bytes());
-        let entry = CachedCatalog {
-            joined: Arc::clone(&joined),
-            sha256_hex,
-        };
+        let joined = serialized.join("\n");
+        let entry: Arc<str> = Arc::from(sha256_hex(joined.as_bytes()).as_str());
 
         if self.by_identity.len() >= self.capacity
             && let Some(oldest) = self.insertion_order.pop_front()
         {
             self.by_identity.remove(&oldest);
         }
-        self.by_identity.insert(identity, entry.clone());
+        self.by_identity.insert(identity, Arc::clone(&entry));
         self.insertion_order.push_back(identity);
         entry
     }
@@ -787,8 +767,11 @@ mod tests {
 
         let second = cache.fingerprint_for(&tools);
         assert_eq!(cache.len(), 1, "second call should be a cache hit");
-        assert!(Arc::ptr_eq(&first.joined, &second.joined));
-        assert_eq!(first.sha256_hex, second.sha256_hex);
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "second call must return the stored digest, not a recomputed one"
+        );
+        assert_eq!(first, second);
     }
 
     #[test]
@@ -800,8 +783,8 @@ mod tests {
         let entry_a = cache.fingerprint_for(&a);
         let entry_b = cache.fingerprint_for(&b);
         assert_eq!(cache.len(), 2);
-        assert_ne!(entry_a.sha256_hex, entry_b.sha256_hex);
-        assert!(!Arc::ptr_eq(&entry_a.joined, &entry_b.joined));
+        assert_ne!(entry_a, entry_b);
+        assert!(!Arc::ptr_eq(&entry_a, &entry_b));
     }
 
     #[test]
@@ -815,9 +798,10 @@ mod tests {
         let b = vec![make_tool("write_file"), make_tool("read_file")];
         let entry_a = cache.fingerprint_for(&a);
         let entry_b = cache.fingerprint_for(&b);
-        // Joined output is the same (sorted) but the two cache entries are
-        // distinct because their identities differ.
-        assert_eq!(entry_a.joined.as_str(), entry_b.joined.as_str());
+        // The digest is the same (the catalog is sorted before hashing) but
+        // the two cache entries are distinct because their identities differ.
+        assert_eq!(entry_a, entry_b);
+        assert!(!Arc::ptr_eq(&entry_a, &entry_b));
         assert_eq!(cache.len(), 2);
     }
 
@@ -830,7 +814,7 @@ mod tests {
 
         let entry_v1 = cache.fingerprint_for(&[tool_v1]);
         let entry_v2 = cache.fingerprint_for(&[tool_v2]);
-        assert_ne!(entry_v1.sha256_hex, entry_v2.sha256_hex);
+        assert_ne!(entry_v1, entry_v2);
         assert_eq!(cache.len(), 2);
     }
 
@@ -849,7 +833,7 @@ mod tests {
         assert_eq!(cache.len(), 2);
         // The returned entry should be the same as a fresh fingerprint.
         let fresh = cache.fingerprint_for(&[make_tool("a")]);
-        assert!(Arc::ptr_eq(&re_entry.joined, &fresh.joined));
+        assert!(Arc::ptr_eq(&re_entry, &fresh));
     }
 
     #[test]
@@ -867,9 +851,9 @@ mod tests {
         // Empty input is fine — should produce a stable, non-empty digest.
         let mut cache = ToolCatalogCache::new();
         let entry = cache.fingerprint_for(&[]);
-        assert!(!entry.sha256_hex.is_empty());
+        assert!(!entry.is_empty());
         let again = cache.fingerprint_for(&[]);
-        assert!(Arc::ptr_eq(&entry.joined, &again.joined));
+        assert!(Arc::ptr_eq(&entry, &again));
     }
 
     #[test]

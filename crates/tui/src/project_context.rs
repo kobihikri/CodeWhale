@@ -1309,9 +1309,13 @@ struct LoadedContextFile {
     truncation_warning: Option<String>,
 }
 
-/// Process-wide queue of context-loading warnings that must reach the user's
-/// eyes, not just the tracing log. Modeled on `prompts::PROMPT_OVERRIDE_NOTICES`
-/// and drained by the TUI event loop.
+/// Process-wide queue of startup warnings that must reach the user's eyes, not
+/// just the tracing log. Modeled on `prompts::PROMPT_OVERRIDE_NOTICES` and
+/// drained by the TUI event loop.
+///
+/// Named for its first caller (project-context loading) but deliberately shared:
+/// #3947 routes silently-relaxed sandbox policy here rather than inventing a
+/// third parallel notice queue.
 ///
 /// Project context is reloaded on every prompt build, so the queue dedupes:
 /// each distinct message is announced at most once per process.
@@ -1319,7 +1323,7 @@ static CONTEXT_NOTICES: LazyLock<Mutex<Vec<String>>> = LazyLock::new(|| Mutex::n
 static CONTEXT_NOTICES_SEEN: LazyLock<Mutex<HashSet<String>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
-fn push_context_notice(message: &str) {
+pub(crate) fn push_context_notice(message: &str) {
     let Ok(mut seen) = CONTEXT_NOTICES_SEEN.lock() else {
         return;
     };

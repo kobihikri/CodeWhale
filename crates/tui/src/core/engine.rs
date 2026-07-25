@@ -1116,12 +1116,20 @@ impl Engine {
             crate::tools::large_output_router::WorkshopVariables::default(),
         )));
 
-        // External sandbox backend (#516). Logged but non-fatal: if the
-        // backend fails to construct, the engine continues with local
-        // execution as the fallback.
+        // External sandbox backend (#516). Non-fatal: if the backend fails to
+        // construct, the engine continues with local execution as the fallback.
+        //
+        // #3947: that fallback narrows nothing and *relaxes* everything — the
+        // user asked for remote, isolated execution and gets a local shell.
+        // A `tracing::warn` nobody reads is not consent, so the degradation is
+        // also queued as a user-visible notice.
         let sandbox_backend = crate::sandbox::backend::create_backend(api_config)
             .unwrap_or_else(|e| {
                 tracing::warn!("Failed to create sandbox backend: {e}");
+                crate::project_context::push_context_notice(&format!(
+                    "Sandbox backend unavailable ({e}). Shell commands will run \
+                     locally on this machine without it."
+                ));
                 None
             })
             .map(std::sync::Arc::from);

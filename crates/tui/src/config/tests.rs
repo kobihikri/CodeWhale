@@ -9990,3 +9990,51 @@ fn picker_consent_persists_only_confirmed_exact_scope_and_revoke_is_one_step() {
         (0, 0, 0, 0, 0)
     );
 }
+
+/// #3947: a misspelled `sandbox_backend` used to resolve silently to "no
+/// external sandbox", i.e. ordinary local execution. `sandbox_mode` has always
+/// rejected typos; `sandbox_backend` must too, or the strictest-looking config
+/// in the file is the one that quietly guards nothing.
+#[test]
+fn unknown_sandbox_backend_is_rejected_instead_of_falling_back_to_local() {
+    let config: Config = toml::from_str("sandbox_backend = \"open-sandbx\"\n")
+        .expect("typo is syntactically valid TOML");
+
+    let err = config
+        .validate()
+        .expect_err("a misspelled sandbox_backend must not resolve to local execution");
+    let message = err.to_string();
+    assert!(
+        message.contains("sandbox_backend") && message.contains("open-sandbx"),
+        "error should name the rejected value: {message}"
+    );
+}
+
+/// The same typo must not reach backend construction as a silent `None`.
+#[test]
+fn create_backend_refuses_unknown_sandbox_backend() {
+    let config: Config = toml::from_str("sandbox_backend = \"firejail\"\n").expect("valid TOML");
+
+    // `Box<dyn SandboxBackend>` is not `Debug`, so unwrap the Result by hand.
+    let Err(err) = crate::sandbox::backend::create_backend(&config) else {
+        panic!("unknown backend must be an error, not an unsandboxed fallback");
+    };
+    assert!(
+        err.to_string().contains("firejail"),
+        "error should name the rejected value: {err}"
+    );
+}
+
+/// Recognized values still resolve, including the explicit opt-out.
+#[test]
+fn known_sandbox_backend_values_still_resolve() -> Result<()> {
+    let none: Config = toml::from_str("sandbox_backend = \"none\"\n")?;
+    none.validate()?;
+    assert!(crate::sandbox::backend::create_backend(&none)?.is_none());
+
+    let external: Config = toml::from_str("sandbox_backend = \"opensandbox\"\n")?;
+    external.validate()?;
+    assert!(crate::sandbox::backend::create_backend(&external)?.is_some());
+
+    Ok(())
+}

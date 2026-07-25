@@ -847,7 +847,12 @@ async fn submit_keyless_onboarding_provider(
     true
 }
 
-fn surface_prompt_override_notices(app: &mut App) {
+/// Drain the queued startup warnings into the transcript and a toast.
+///
+/// Split out from [`surface_prompt_override_notices`] because it is the only
+/// half that is safe to run more than once: the queues dedupe and drain to
+/// empty, whereas the provenance announcement below would duplicate (#3947).
+fn drain_startup_notices(app: &mut App) {
     let notices = prompts::take_prompt_override_notices()
         .into_iter()
         .chain(crate::project_context::take_context_notices());
@@ -857,6 +862,10 @@ fn surface_prompt_override_notices(app: &mut App) {
         });
         app.push_status_toast(notice, StatusToastLevel::Warning, Some(12_000));
     }
+}
+
+fn surface_prompt_override_notices(app: &mut App) {
+    drain_startup_notices(app);
     surface_base_prompt_provenance(app, crate::prompt_provenance::current());
 }
 
@@ -1217,6 +1226,12 @@ pub async fn run_tui(
     // Spawn the Engine - it will handle all API communication
     let engine_handle = spawn_tui_engine(engine_config, config);
     crate::startup_trace::mark("engine_spawned");
+    // Engine construction is the first thing that can silently relax a
+    // security-relevant policy (a configured sandbox backend that failed to
+    // build). It runs *after* the startup drain above, so drain again here or
+    // that notice dies in the queue (#3947). The queue dedupes, so the common
+    // case is a no-op.
+    drain_startup_notices(&mut app);
     // The translation client is optional: it never crashes the TUI on
     // startup, even when the API key is missing, the base URL is malformed,
     // or the network is unavailable.

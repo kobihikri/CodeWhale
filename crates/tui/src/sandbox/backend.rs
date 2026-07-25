@@ -73,6 +73,11 @@ use crate::config::Config;
 /// `sandbox_backend` key is absent, empty, or `"none"`). When `"opensandbox"`
 /// is set, constructs an [`OpenSandboxBackend`](super::opensandbox::OpenSandboxBackend) using `sandbox_url` and
 /// `sandbox_api_key`.
+///
+/// An unrecognized value is an error, never a fallback (#3947). Falling back to
+/// `None` silently relaxed a security-relevant policy: a user who wrote
+/// `sandbox_backend = "open-sandbx"` got ordinary local execution with no
+/// signal anywhere, while believing every command was leaving the machine.
 pub fn create_backend(config: &Config) -> Result<Option<Box<dyn SandboxBackend>>> {
     let kind = config
         .sandbox_backend

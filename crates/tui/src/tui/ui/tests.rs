@@ -11071,6 +11071,53 @@ fn prompt_override_notice_surfaces_in_transcript_and_toast() {
     assert_eq!(toast.level, StatusToastLevel::Warning);
 }
 
+/// #3947: the engine is constructed *after* the startup notice drain, so a
+/// security-relevant degradation it queues (a configured sandbox backend that
+/// failed to build) must survive a second drain. And that second drain must
+/// not re-announce the base-prompt provenance, which is why the drain half is
+/// split out from `surface_prompt_override_notices`.
+#[test]
+fn notices_queued_after_startup_still_reach_the_user_without_duplicate_provenance() {
+    let _lock = crate::test_support::lock_test_env();
+    let _ = prompts::take_prompt_override_notices();
+    let _ = crate::project_context::take_context_notices();
+
+    let mut app = create_test_app();
+    // Startup drain: queue is empty, nothing to say.
+    surface_prompt_override_notices(&mut app);
+    let after_startup = app.history.len();
+
+    // Engine construction discovers the sandbox backend cannot be built.
+    let notice = "Sandbox backend unavailable (test). Shell commands will run \
+locally on this machine without it.";
+    crate::project_context::push_context_notice(notice);
+
+    drain_startup_notices(&mut app);
+
+    let surfaced: Vec<&String> = app
+        .history
+        .iter()
+        .skip(after_startup)
+        .filter_map(|cell| match cell {
+            HistoryCell::System { content } => Some(content),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        surfaced
+            .iter()
+            .any(|content| content.contains("Sandbox backend unavailable")),
+        "post-startup sandbox notice must reach the transcript, got {surfaced:?}"
+    );
+    assert!(
+        !surfaced
+            .iter()
+            .any(|content| content.contains("Run /constitution text to read it.")),
+        "second drain must not re-announce base-prompt provenance, got {surfaced:?}"
+    );
+    let _ = crate::project_context::take_context_notices();
+}
+
 /// #3928: an active Constitution override must be user-visible, not
 /// `tracing::info`-only.
 #[test]

@@ -61,6 +61,10 @@ fn reqwest_client() -> reqwest::Client {
 /// Lives at `~/.codewhale/cache/skills/` so it's separate from user-installed
 /// skills and can be blown away without losing anything irreplaceable.
 pub fn default_cache_skills_dir() -> PathBuf {
+    // Deliberately raw (#4757): this file is `#[path]`-included into the
+    // `skill_cli` integration-test binary, which has no `crate::config`, so
+    // `effective_home_dir()` is unreachable from here. No HOME-faking test
+    // covers this path today.
     dirs::home_dir().map_or_else(
         || PathBuf::from("/tmp/codewhale/cache/skills"),
         |p| p.join(".codewhale").join("cache").join("skills"),

@@ -42,7 +42,7 @@ const MAX_SKILL_NAME_CHARS: usize = 64;
 
 #[must_use]
 pub fn default_skills_dir() -> PathBuf {
-    dirs::home_dir().map_or_else(
+    crate::config::effective_home_dir().map_or_else(
         || PathBuf::from("/tmp/codewhale/skills"),
         |p| p.join(".codewhale").join("skills"),
     )
@@ -51,7 +51,7 @@ pub fn default_skills_dir() -> PathBuf {
 /// Global agentskills.io-compatible skills directory (`~/.agents/skills`).
 #[must_use]
 pub fn agents_global_skills_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|p| p.join(".agents").join("skills"))
+    crate::config::effective_home_dir().map(|p| p.join(".agents").join("skills"))
 }
 
 // === Types ===
@@ -714,7 +714,7 @@ pub fn skills_directories(workspace: &Path) -> Vec<PathBuf> {
 
 #[must_use]
 pub fn skills_directories_for_mode(workspace: &Path, mode: SkillDiscoveryMode) -> Vec<PathBuf> {
-    let home = dirs::home_dir();
+    let home = crate::config::effective_home_dir();
     skills_directories_with_home_and_mode(workspace, home.as_deref(), mode)
 }
 
@@ -1049,7 +1049,7 @@ fn sanitize_prompt_path_text(text: &str, workspace: &Path) -> String {
     {
         out = out.replace(ws, ".");
     }
-    if let Some(home) = dirs::home_dir()
+    if let Some(home) = crate::config::effective_home_dir()
         && let Some(home_str) = home.to_str()
         && !home_str.is_empty()
     {
@@ -1078,7 +1078,7 @@ fn privacy_safe_skill_path(path: &Path, workspace: &Path) -> String {
     if let Ok(rel) = path.strip_prefix(workspace) {
         return rel.display().to_string();
     }
-    if let Some(home) = dirs::home_dir()
+    if let Some(home) = crate::config::effective_home_dir()
         && let Ok(rel) = path.strip_prefix(&home)
     {
         return format!("~/{}", rel.display());
@@ -1198,6 +1198,33 @@ mod tests {
         let skill_dir = tmpdir.path().join("skills").join(skill_name);
         std::fs::create_dir_all(&skill_dir).unwrap();
         std::fs::write(skill_dir.join("SKILL.md"), skill_content).unwrap();
+    }
+
+    /// The skills subsystem must resolve home through the env-respecting
+    /// resolver, not raw `dirs::home_dir()` (#4757). Raw `dirs::home_dir()`
+    /// ignores `USERPROFILE` on Windows and falls back to `getpwuid` on Unix,
+    /// so a test that fakes home via env vars silently disagrees with
+    /// production. This test removes `HOME` so only the env-respecting
+    /// resolver can see the fake home.
+    #[test]
+    fn skills_roots_follow_the_faked_home_env_not_the_os_account_home() {
+        let _lock = crate::test_support::lock_test_env();
+        let fake_home = TempDir::new().expect("fake home");
+        let _home = crate::test_support::EnvVarGuard::remove("HOME");
+        let _userprofile = crate::test_support::EnvVarGuard::set("USERPROFILE", fake_home.path());
+
+        let roots = [
+            super::default_skills_dir(),
+            super::agents_global_skills_dir().expect("agents skills dir"),
+        ];
+        for root in roots {
+            assert!(
+                root.starts_with(fake_home.path()),
+                "{} must resolve under the faked home {}",
+                root.display(),
+                fake_home.path().display()
+            );
+        }
     }
 
     #[test]

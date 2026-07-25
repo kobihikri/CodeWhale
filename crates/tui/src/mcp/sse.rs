@@ -16,7 +16,9 @@ pub(super) struct SseTransport {
     pub(super) auth: McpHttpAuth,
     pub(super) endpoint_url: Option<String>,
     pub(super) receiver: tokio::sync::mpsc::Receiver<SseInbound>,
-    #[allow(dead_code)]
+    /// Owns the background SSE reader task. Read by `shutdown` and by the
+    /// `Drop` impl, both of which abort it — dropping the handle alone would
+    /// merely detach the task and leave it running without an owner.
     pub(super) sse_task: tokio::task::JoinHandle<()>,
 }
 

@@ -613,6 +613,114 @@ fn completion_sound_state_for_tests() -> (crate::config::CompletionSound, Option
 /// This is best-effort: if `osascript` is not available (e.g. headless SSH
 /// session) the error is logged via `tracing::warn!` instead of silently
 /// swallowed.
+/// Locate `codewhale-notify` inside its app bundle, assembling the bundle if
+/// needed, and post through it.
+///
+/// The bundle is what makes the icon possible: `UNUserNotificationCenter`
+/// refuses to run in a process with no bundle identifier, and Notification
+/// Center takes the icon from the posting bundle. Assembling it next to the
+/// running binary keeps a dev build and an installed build behaving the same.
+#[cfg(target_os = "macos")]
+fn macos_notify_via_helper(body: &str, subtitle: &str) -> Result<(), String> {
+    let app = macos_helper_bundle()?;
+    let exe = app.join("Contents/MacOS/codewhale-notify");
+
+    let output = std::process::Command::new(&exe)
+        .arg("Codewhale")
+        .arg(body)
+        .arg(subtitle)
+        .output()
+        .map_err(|e| format!("spawn {}: {e}", exe.display()))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(format!(
+        "helper exited {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    ))
+}
+
+/// Path to `Codewhale Notify.app`, created on first use.
+///
+/// Returns `Err` when the `codewhale-notify` binary was not shipped alongside
+/// the running executable — a source build of only `codewhale-tui`, or a
+/// packager that dropped it — so the caller falls back rather than failing.
+#[cfg(target_os = "macos")]
+fn macos_helper_bundle() -> Result<std::path::PathBuf, String> {
+    use std::io::Write;
+
+    let exe_dir = std::env::current_exe()
+        .map_err(|e| format!("current_exe: {e}"))?
+        .parent()
+        .ok_or_else(|| "executable has no parent directory".to_string())?
+        .to_path_buf();
+    let helper_bin = exe_dir.join("codewhale-notify");
+    if !helper_bin.is_file() {
+        return Err(format!("{} not found", helper_bin.display()));
+    }
+
+    let home = std::env::var_os("HOME").ok_or_else(|| "HOME unset".to_string())?;
+    let app = std::path::PathBuf::from(home)
+        .join("Library/Application Support/codewhale/Codewhale Notify.app");
+    let staged_bin = app.join("Contents/MacOS/codewhale-notify");
+
+    // Rebuild when the shipped helper is newer, so an upgrade does not keep
+    // running last release's binary out of the cached bundle.
+    let stale = match (helper_bin.metadata(), staged_bin.metadata()) {
+        (Ok(src), Ok(dst)) => match (src.modified(), dst.modified()) {
+            (Ok(src_time), Ok(dst_time)) => src_time > dst_time,
+            _ => true,
+        },
+        (Ok(_), Err(_)) => true,
+        _ => return Err("helper metadata unreadable".to_string()),
+    };
+    if !stale {
+        return Ok(app);
+    }
+
+    let macos_dir = app.join("Contents/MacOS");
+    let resources = app.join("Contents/Resources");
+    std::fs::create_dir_all(&macos_dir).map_err(|e| format!("create bundle: {e}"))?;
+    std::fs::create_dir_all(&resources).map_err(|e| format!("create bundle: {e}"))?;
+    std::fs::copy(&helper_bin, &staged_bin).map_err(|e| format!("stage helper: {e}"))?;
+    std::fs::write(
+        resources.join("codewhale.icns"),
+        include_bytes!("../../assets/codewhale.icns"),
+    )
+    .map_err(|e| format!("write icon: {e}"))?;
+
+    let plist = br#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleName</key><string>Codewhale</string>
+  <key>CFBundleDisplayName</key><string>Codewhale</string>
+  <key>CFBundleIdentifier</key><string>net.codewhale.notify.helper</string>
+  <key>CFBundleExecutable</key><string>codewhale-notify</string>
+  <key>CFBundleIconFile</key><string>codewhale</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>LSUIElement</key><true/>
+  <key>NSPrincipalClass</key><string>NSApplication</string>
+</dict></plist>
+"#;
+    let mut f = std::fs::File::create(app.join("Contents/Info.plist"))
+        .map_err(|e| format!("write Info.plist: {e}"))?;
+    f.write_all(plist)
+        .map_err(|e| format!("write Info.plist: {e}"))?;
+
+    // Ad-hoc sign so the bundle has a stable-enough identity for Notification
+    // Center; ignore failure, since an unsigned bundle still posts on many
+    // configurations and the caller falls back if it does not.
+    let _ = std::process::Command::new("codesign")
+        .args(["--force", "--deep", "--sign", "-"])
+        .arg(&app)
+        .output();
+
+    Ok(app)
+}
+
 #[cfg(target_os = "macos")]
 fn macos_display_notification(msg: &str) {
     let message = msg.to_string();
@@ -630,6 +738,23 @@ fn macos_display_notification(msg: &str) {
             // the `"` and leave a dangling `\`. Passing the message as
             // a command-line argument avoids any injection risk.
             let (subtitle, body) = macos_notification_parts(&message);
+
+            // Prefer the bundled helper: Notification Center shows the icon of
+            // the bundle that posts, and this CLI has no bundle identity, so
+            // the osascript path below is always attributed to Script Editor
+            // and shows a generic icon. The helper posts from
+            // `Codewhale Notify.app`, which carries our mark.
+            //
+            // Any failure falls through to osascript rather than dropping the
+            // notification: a missing icon is cosmetic, a missing "approval
+            // needed" alert is not.
+            match macos_notify_via_helper(&body, &subtitle) {
+                Ok(()) => return,
+                Err(err) => {
+                    tracing::debug!(error = %err, "notify helper unavailable; using osascript");
+                }
+            }
+
             let args = [
                 "-e".to_string(),
                 "on run argv".to_string(),

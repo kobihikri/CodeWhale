@@ -60,7 +60,7 @@ purpose; the gate still requires every key it *does* define to exist in
 | Japanese | `ja` | **planned** | README exists (`README.ja-JP.md`); website route not yet live. Depends on locale-switcher supporting >2 languages and dictionary scaffolding (#3091). |
 | Vietnamese | `vi` | **planned** | README exists (`README.vi.md`); same dependencies as Japanese (#3091). |
 | Korean | `ko` | **planned** | Website only — README and a complete TUI pack already ship. #3093 next-wave locale. |
-| Russian | `ru` | **planned** | **Next-priority locale.** No README yet; explicitly scoped for #3092. Latin+Cyrillic layout is established in the CSS font stack; needs dictionary + route scaffolding. |
+| Russian | `ru` | **planned** | **Next-priority locale.** No README yet; explicitly scoped for #3092. Cyrillic is **not** covered by the current webfonts — all four `next/font/google` families in `web/app/[locale]/layout.tsx` load `subsets: ["latin"]` only, so Cyrillic falls through to the `system-ui` fallback in `web/app/globals.css`. Needs a font-subset decision plus dictionary + route scaffolding. |
 | Spanish | `es` | **deferred** | Website only — the TUI ships a complete `es-419` pack and `README.es-419.md` exists. #3093 next-wave for the site. |
 | Brazilian Portuguese | `pt-BR` | **deferred** | Website only — the TUI ships a complete `pt-BR` pack and `README.pt-BR.md` exists. #3093 next-wave for the site. |
 | Arabic | `ar` | **deferred** | RTL candidate. Deferred until layout/typography QA exists (bidirectional text, mirrored chrome, number formatting). |

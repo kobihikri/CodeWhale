@@ -10,6 +10,7 @@ members = [
     "crates/hooks",
     "crates/lane",
     "crates/mcp",
+    "crates/notify-helper",
     "crates/protocol",
     "crates/release",
     "crates/secrets",

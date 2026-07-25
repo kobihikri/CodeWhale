@@ -1,0 +1,28 @@
+[package]
+name = "codewhale-notify"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# macOS-only helper. Notification Center always attributes a notification to the
+# bundle that sent it — there is no per-notification icon API — so getting the
+# Codewhale mark on an alert requires a real .app bundle with our icon posting
+# it. This binary is that bundle's executable.
+
+[[bin]]
+name = "codewhale-notify"
+path = "src/main.rs"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSError", "NSDate", "NSRunLoop", "NSThread"] }
+objc2-user-notifications = { version = "0.3", features = [
+  "UNUserNotificationCenter",
+  "UNNotificationContent",
+  "UNNotificationRequest",
+  "UNNotificationTrigger",
+  "UNNotificationSound",
+] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSResponder", "NSRunningApplication"] }
+block2 = "0.6"

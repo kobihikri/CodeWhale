@@ -4369,6 +4369,16 @@ async fn run_event_loop(
         {
             app.needs_redraw = true;
         }
+        // Drain the Ctrl+P picker's background workspace scan (git status +
+        // WalkBuilder) so results replace "Scanning workspace…" without
+        // waiting for an input event (#3905).
+        if let Some(picker) = app
+            .view_stack
+            .top_mut_as::<crate::tui::file_picker::FilePickerView>()
+            && picker.poll_background()
+        {
+            app.needs_redraw = true;
+        }
         // Completion discovery is serialized off-thread. Polling is
         // non-blocking and makes a finished initial `@` scan visible even
         // after the user stops typing (#4365).

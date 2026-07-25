@@ -2702,6 +2702,59 @@ fn tool_path_relevance_extracts_paths_from_command_text() {
     assert_eq!(view.selected_for_test(), Some("src/zeta.rs"));
 }
 
+/// #3905: opening the Ctrl+P picker must not run `git status` plus the
+/// workspace walk on the event loop. Under a runtime the picker is pushed
+/// empty in its loading state and the scan lands later via `poll_background`.
+#[tokio::test]
+async fn file_picker_defers_workspace_scan_off_the_event_loop() {
+    use crate::tui::file_picker::FilePickerView;
+
+    let dir = TempDir::new().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/alpha.rs"), "").unwrap();
+
+    let mut app = create_test_app();
+    app.workspace = dir.path().to_path_buf();
+
+    crate::tui::file_picker_relevance::open_file_picker(&mut app);
+
+    let picker = app
+        .view_stack
+        .top_mut_as::<FilePickerView>()
+        .expect("file picker pushed");
+    assert!(
+        picker.is_loading(),
+        "Ctrl+P must push the picker before the blocking scan runs"
+    );
+    assert_eq!(
+        picker.visible_count(),
+        0,
+        "no candidates may be collected on the event loop"
+    );
+
+    let mut settled = false;
+    for _ in 0..300 {
+        if app
+            .view_stack
+            .top_mut_as::<FilePickerView>()
+            .expect("file picker still open")
+            .poll_background()
+        {
+            settled = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(settled, "background scan never delivered a result");
+
+    let picker = app
+        .view_stack
+        .top_mut_as::<FilePickerView>()
+        .expect("file picker still open");
+    assert!(!picker.is_loading());
+    assert_eq!(picker.selected_for_test(), Some("src/alpha.rs"));
+}
+
 fn create_test_app() -> App {
     let options = TuiOptions {
         model: "deepseek-v4-pro".to_string(),

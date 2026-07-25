@@ -13,6 +13,7 @@
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ignore::WalkBuilder;
@@ -115,6 +116,19 @@ impl FilePickerRelevance {
     }
 }
 
+/// Result of the blocking workspace scan the picker needs before it can show
+/// anything: the `git status` working set plus the `WalkBuilder` candidates.
+/// Both are produced off the event loop (#3905).
+#[derive(Debug, Default)]
+pub struct FilePickerScan {
+    pub candidates: Vec<String>,
+    pub modified: Vec<String>,
+}
+
+/// Shared hand-off cell for a background scan, mirroring the file-tree
+/// pattern in `file_tree.rs` (#3900).
+pub type FilePickerScanCell = Arc<Mutex<Option<FilePickerScan>>>;
+
 pub struct FilePickerView {
     /// All workspace-relative candidate paths, captured once at construction.
     candidates: Vec<String>,
@@ -132,6 +146,10 @@ pub struct FilePickerView {
     last_row_hitboxes: RefCell<Vec<(u16, usize)>>,
     /// UI locale captured from the app at construction (#4057 wave 2).
     locale: Locale,
+    /// True while the background workspace scan is still running (#3905).
+    is_loading: bool,
+    /// Shared cell the background scan writes its result into (#3905).
+    loading_cell: FilePickerScanCell,
 }
 
 impl FilePickerView {
@@ -147,20 +165,31 @@ impl FilePickerView {
     /// Build a picker with working-set relevance hints and an explicit walk
     /// depth. A depth of `0` disables the depth limit so files in deeply
     /// nested workspaces (>= 6 levels) remain discoverable (#2488).
+    ///
+    /// Test-only: production opens the picker through
+    /// `file_picker_relevance::open_file_picker`, which never walks the
+    /// workspace on the event loop (#3905).
+    #[cfg(test)]
     pub fn new_with_relevance_and_depth(
         workspace_root: &Path,
         relevance: FilePickerRelevance,
         walk_depth: usize,
         locale: Locale,
     ) -> Self {
-        let max_depth = if walk_depth == 0 {
-            None
-        } else {
-            Some(walk_depth)
-        };
-        let candidates = collect_candidates(workspace_root, max_depth);
-        let mut view = Self {
-            candidates,
+        let candidates = walk_candidates(workspace_root, walk_depth);
+        let mut view = Self::new_loading(relevance, locale);
+        view.candidates = candidates;
+        view.is_loading = false;
+        view.refilter();
+        view
+    }
+
+    /// Build an empty picker in the "scanning workspace" state. The caller
+    /// runs [`scan_workspace`] off the event loop and hands the result back
+    /// through [`Self::loading_cell`] (#3905).
+    pub fn new_loading(relevance: FilePickerRelevance, locale: Locale) -> Self {
+        Self {
+            candidates: Vec::new(),
             relevance,
             filtered: Vec::new(),
             query: String::new(),
@@ -168,9 +197,48 @@ impl FilePickerView {
             scroll: 0,
             last_row_hitboxes: RefCell::new(Vec::new()),
             locale,
+            is_loading: true,
+            loading_cell: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Handle the background scan writes into.
+    pub fn loading_cell(&self) -> FilePickerScanCell {
+        Arc::clone(&self.loading_cell)
+    }
+
+    /// True until the background scan has been folded in.
+    pub fn is_loading(&self) -> bool {
+        self.is_loading
+    }
+
+    /// Fold a completed scan into the picker and re-run the filter.
+    pub fn apply_scan(&mut self, scan: FilePickerScan) {
+        self.candidates = scan.candidates;
+        for path in scan.modified {
+            self.relevance.mark_modified(path);
+        }
+        self.is_loading = false;
+        self.refilter();
+    }
+
+    /// Drain a completed background scan. Returns `true` when results were
+    /// applied so the event loop can schedule a repaint (#3905).
+    pub fn poll_background(&mut self) -> bool {
+        if !self.is_loading {
+            return false;
+        }
+        let scan = match self.loading_cell.lock() {
+            Ok(mut guard) => guard.take(),
+            Err(_) => return false,
         };
-        view.refilter();
-        view
+        match scan {
+            Some(scan) => {
+                self.apply_scan(scan);
+                true
+            }
+            None => false,
+        }
     }
 
     fn refilter(&mut self) {
@@ -415,8 +483,13 @@ impl ModalView for FilePickerView {
         let end = (self.scroll + visible).min(self.filtered.len());
         self.last_row_hitboxes.borrow_mut().clear();
         if self.filtered.is_empty() {
+            let empty_label = if self.is_loading {
+                "  Scanning workspace…"
+            } else {
+                "  No matches"
+            };
             lines.push(Line::from(Span::styled(
-                "  No matches",
+                empty_label,
                 Style::default().fg(palette::TEXT_MUTED),
             )));
         } else {
@@ -472,6 +545,17 @@ fn truncate_path(path: &str, max: usize) -> String {
         .rev()
         .collect();
     format!("…{truncated}")
+}
+
+/// Blocking workspace walk, keyed by the configured `mention_walk_depth`
+/// (`0` = unlimited). Runs on a background thread in production (#3905).
+pub(super) fn walk_candidates(root: &Path, walk_depth: usize) -> Vec<String> {
+    let max_depth = if walk_depth == 0 {
+        None
+    } else {
+        Some(walk_depth)
+    };
+    collect_candidates(root, max_depth)
 }
 
 /// Single-pass walk that collects workspace-relative paths. `max_depth` of

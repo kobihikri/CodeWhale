@@ -1034,6 +1034,12 @@ impl ViewStack {
         tracing::debug!(target: "codewhale_tui::view_stack", action = "push_boxed", kind = ?kind, depth = self.views.len(), "view pushed");
     }
 
+    /// Typed `&mut` access to the top view, for callers that need to drive a
+    /// view's background work from the event loop (#3905).
+    pub fn top_mut_as<V: 'static>(&mut self) -> Option<&mut V> {
+        self.views.last_mut()?.as_any_mut().downcast_mut::<V>()
+    }
+
     pub fn pop(&mut self) -> Option<Box<dyn ModalView>> {
         let popped = self.views.pop();
         if let Some(view) = popped.as_ref() {

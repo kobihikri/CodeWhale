@@ -540,16 +540,50 @@ fn write_text_with_tmux_using_argv(program: &str, prefix_args: &[&str], text: &s
 
 #[cfg(not(test))]
 fn write_text_with_osc52(text: &str) -> Result<()> {
-    let mut stdout = io::stdout();
-    if !stdout.is_terminal() {
+    if !io::stdout().is_terminal() {
         bail!("OSC 52 clipboard fallback requires a terminal");
     }
 
+    // Validate and encode on the caller's thread so every failure the caller
+    // can act on (no terminal, oversized selection) is still reported
+    // synchronously; only the write itself is handed off (#4159).
     let sequence = osc52_sequence(text)?;
-    stdout
-        .write_all(sequence.as_bytes())
-        .context("write OSC 52 clipboard sequence")?;
-    stdout.flush().context("flush OSC 52 clipboard sequence")
+    dispatch_osc52_sequence(io::stdout(), sequence);
+    Ok(())
+}
+
+/// Ship an already-encoded OSC 52 sequence to the terminal without blocking
+/// the caller.
+///
+/// A terminal that has stopped draining its input (slow SSH link, suspended
+/// emulator) can stall a write of up to `OSC52_MAX_BYTES` for seconds. On the
+/// TUI event loop that freezes every redraw and keypress, so the write runs on
+/// the same supervised blocking pool the rest of the TUI's off-thread work
+/// uses (#4159). `io::Stdout` holds its process-wide lock for the whole
+/// `write_all`, so the escape can never interleave with a rendered frame.
+fn dispatch_osc52_sequence<W>(mut sink: W, sequence: String)
+where
+    W: std::io::Write + Send + 'static,
+{
+    let write = move || {
+        if let Err(err) = sink
+            .write_all(sequence.as_bytes())
+            .and_then(|()| sink.flush())
+        {
+            tracing::debug!(
+                target: "codewhale_tui::clipboard",
+                error = %err,
+                "OSC 52 clipboard write failed"
+            );
+        }
+    };
+    if tokio::runtime::Handle::try_current().is_ok() {
+        crate::utils::spawn_blocking_supervised("clipboard-osc52", write);
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("clipboard-osc52".to_string())
+        .spawn(write);
 }
 
 fn osc52_sequence(text: &str) -> Result<String> {
@@ -866,6 +900,49 @@ mod tests {
         assert!(
             err.to_string().contains("too large"),
             "unexpected error: {err}"
+        );
+    }
+
+    /// #4159: a terminal that is slow to accept the escape must not stall the
+    /// caller — on the TUI that caller is the render/event loop.
+    #[test]
+    fn osc52_dispatch_does_not_block_the_caller_on_a_slow_terminal() {
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+
+        struct SlowSink(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for SlowSink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                std::thread::sleep(Duration::from_millis(400));
+                self.0.lock().expect("sink lock").extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sequence = osc52_sequence("hello").expect("sequence");
+
+        let start = Instant::now();
+        dispatch_osc52_sequence(SlowSink(Arc::clone(&seen)), sequence.clone());
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(150),
+            "OSC 52 write blocked the caller for {elapsed:?}"
+        );
+
+        for _ in 0..100 {
+            if !seen.lock().expect("sink lock").is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            String::from_utf8(seen.lock().expect("sink lock").clone()).expect("utf8"),
+            sequence,
+            "the sequence must still reach the terminal, just off the caller's thread"
         );
     }
 

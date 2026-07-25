@@ -22,30 +22,51 @@ use crate::tui::app::App;
 use crate::tui::app::ToolDetailRecord;
 use crate::tui::file_mention::{ContextReferenceKind, ContextReferenceSource};
 use crate::tui::file_picker::FilePickerRelevance;
+use crate::tui::file_picker::FilePickerScan;
 use crate::tui::file_picker::FilePickerView;
 
 /// Push the `/files` picker onto the view stack, pre-populated with
 /// per-session relevance ranks (modified, @-mentioned, tool-touched).
+///
+/// The picker is pushed in its loading state immediately; the blocking work
+/// (a `git status` subprocess plus an up-to-20k-entry `WalkBuilder` walk) runs
+/// on `spawn_blocking_supervised` and is folded in by `poll_background` from
+/// the event loop, so Ctrl+P can no longer freeze the TUI (#3905).
 pub(super) fn open_file_picker(app: &mut App) {
     let relevance = build_relevance(app);
     // Honor the configured `mention_walk_depth` (0 = unlimited) so the picker
     // and `@`-mention completion agree, and files in deeply nested trees stay
     // discoverable (#2488).
-    app.view_stack
-        .push(FilePickerView::new_with_relevance_and_depth(
-            &app.workspace,
-            relevance,
-            app.mention_walk_depth,
-            app.ui_locale,
-        ));
+    let workspace = app.workspace.clone();
+    let walk_depth = app.mention_walk_depth;
+    let mut view = FilePickerView::new_loading(relevance, app.ui_locale);
+    if tokio::runtime::Handle::try_current().is_ok() {
+        let cell = view.loading_cell();
+        crate::utils::spawn_blocking_supervised("file-picker-scan", move || {
+            let scan = scan_workspace(&workspace, walk_depth);
+            if let Ok(mut guard) = cell.lock() {
+                *guard = Some(scan);
+            }
+        });
+    } else {
+        // Plain unit tests run without a runtime; stay synchronous there.
+        view.apply_scan(scan_workspace(&workspace, walk_depth));
+    }
+    app.view_stack.push(view);
 }
 
+/// The blocking half of opening the picker. Never call this on the event loop.
+fn scan_workspace(workspace: &Path, walk_depth: usize) -> FilePickerScan {
+    FilePickerScan {
+        modified: modified_workspace_paths(workspace),
+        candidates: crate::tui::file_picker::walk_candidates(workspace, walk_depth),
+    }
+}
+
+/// In-memory relevance signals only. The `git status` working set is folded
+/// in later by the background scan (see [`scan_workspace`]).
 pub(super) fn build_relevance(app: &App) -> FilePickerRelevance {
     let mut relevance = FilePickerRelevance::default();
-
-    for path in modified_workspace_paths(&app.workspace) {
-        relevance.mark_modified(path);
-    }
 
     for record in app.session_context_references.iter().rev().take(64) {
         let reference = &record.reference;
